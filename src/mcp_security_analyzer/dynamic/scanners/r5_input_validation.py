@@ -1,0 +1,684 @@
+"""R5: Input Handling Vulnerabilities scanner + fuzzing sequences.
+
+Collection phase:  ``FuzzingSequence`` sends payloads (path traversal,
+command injection, SQL injection, NoSQL injection, SSRF, RCE, type
+confusion) to every tool and records test_input / test_result events.
+
+Analysis phase:  ``R5InputValidationScanner`` reads those events and
+checks responses for indicators of successful exploitation or poor
+error handling.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from itertools import groupby
+from typing import Any
+
+import structlog
+
+from mcp_security_analyzer.dynamic.correlation.event_store import EventWriter
+from mcp_security_analyzer.dynamic.models import (
+    AnalysisContext,
+    Event,
+    Finding,
+    RiskType,
+    Severity,
+    ToolInfo,
+)
+from mcp_security_analyzer.dynamic.payloads import (
+    command_injection,
+    nosql_injection,
+    path_traversal,
+    rce,
+    sql_injection,
+    ssrf,
+    type_confusion,
+)
+from mcp_security_analyzer.dynamic.payloads._response_filters import (
+    is_clean_success_envelope,
+    is_handled_tool_error,
+    is_server_outcome,
+    is_validation_rejection,
+    strip_payload_echo,
+)
+from mcp_security_analyzer.dynamic.models import ServerCrashError
+from mcp_security_analyzer.dynamic.protocol.client import McpClient, McpError
+from mcp_security_analyzer.dynamic.scanners._tool_classification import (
+    is_retrieval_tool,
+    lookup_tool,
+)
+from mcp_security_analyzer.dynamic.scanners.base import BaseScanner, TestSequence
+
+log = structlog.get_logger()
+
+_CALL_TIMEOUT = 30.0
+# Skip the rest of a (tool, category) pair after this many timeouts —
+# successive payloads in the same shape (huge ints, etc.) hang for the
+# same reason and only burn the global budget.
+_CIRCUIT_BREAKER_THRESHOLD = 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Collection-phase: TestSequences
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class FuzzingSequence(TestSequence):
+    """Send fuzzing payloads to all string parameters of every tool."""
+
+    def __init__(self, session_id: str) -> None:
+        self._session_id = session_id
+        # Payload *categories* the orchestrator has flagged as server-killing
+        # after a crash-and-restart. Skipped for *every* tool: a process-level
+        # crash takes down all tools, so once a category is shown to crash the
+        # server, re-sending its payloads to other tools only risks more
+        # crashes (each burning a restart budget) for zero new signal — the
+        # finding is already recorded for the first crash.
+        self.skip_categories: set[str] = set()
+
+    @property
+    def name(self) -> str:
+        return "fuzz_input_validation"
+
+    @property
+    def timeout(self) -> float:
+        return 120.0
+
+    async def execute(self, client: Any, writer: EventWriter) -> None:
+        """Breadth-first fuzzing across (depth, category, tool, param).
+
+        Outer loop iterates the **payload index inside each category** so
+        depth=0 visits one payload of every category for every tool before
+        any tool sees its second payload. If the sequence-level timeout
+        fires partway through, every (tool, category) has at least one
+        payload tried — no tool is left untested.
+
+        Categories are kept in risk-priority order so the highest-impact /
+        highest-precision signals (sql_injection, command_injection, rce_*)
+        run before the noisier ones (path_traversal mass, type_confusion
+        variants).
+        """
+        cli: McpClient = client
+        tools = await cli.list_tools()
+        if not tools:
+            return
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.timeout * 0.95
+
+        # Pre-compute per-tool param sets and per-(tool, category) circuit
+        # breaker state. We use the tool name as a stable key.
+        tool_state: list[dict[str, Any]] = []
+        for t in tools:
+            tool_state.append({
+                "tool": t,
+                "string_params": _string_param_names(t),
+                "url_params": _url_param_names(t),
+                "obj_params": _object_param_names(t),
+                "broken_cats": set(),
+            })
+
+        # Risk-priority payload groups: list of (category, [payload, payload, ...]).
+        string_groups = self._payload_groups("string")
+        url_groups = self._payload_groups("url")
+        obj_groups = self._payload_groups("object")
+
+        max_depth = max(
+            (len(p) for _, p in string_groups + url_groups + obj_groups),
+            default=0,
+        )
+
+        log.info(
+            "fuzz.breadth_first_start",
+            tools=len(tools),
+            max_depth=max_depth,
+            string_categories=len(string_groups),
+            url_categories=len(url_groups),
+            object_categories=len(obj_groups),
+            timeout_sec=self.timeout,
+        )
+
+        for depth in range(max_depth):
+            if loop.time() >= deadline:
+                log.warning(
+                    "fuzz.deadline_hit",
+                    depth_reached=depth,
+                    hint="Sequence budget exhausted — every tool has at least "
+                         f"{depth} payload(s) per category from earlier depths.",
+                )
+                break
+            await self._run_depth(
+                cli, writer, depth, tool_state, string_groups, "string", deadline,
+            )
+            if loop.time() >= deadline: break
+            await self._run_depth(
+                cli, writer, depth, tool_state, url_groups, "url", deadline,
+            )
+            if loop.time() >= deadline: break
+            await self._run_depth(
+                cli, writer, depth, tool_state, obj_groups, "object", deadline,
+            )
+
+    async def _run_depth(
+        self,
+        cli: McpClient,
+        writer: EventWriter,
+        depth: int,
+        tool_state: list[dict[str, Any]],
+        groups: list[tuple[str, list[Any]]],
+        param_kind: str,  # "string" | "url" | "object"
+        deadline: float,
+    ) -> None:
+        """For each category at *depth*, fire its payload at every tool."""
+        loop = asyncio.get_running_loop()
+        param_key = {
+            "string": "string_params",
+            "url": "url_params",
+            "object": "obj_params",
+        }[param_kind]
+        for category, payloads in groups:
+            if category in self.skip_categories:
+                continue
+            if depth >= len(payloads):
+                continue
+            if loop.time() >= deadline:
+                return
+            payload = payloads[depth]
+            for state in tool_state:
+                if loop.time() >= deadline:
+                    return
+                params = state[param_key]
+                if not params:
+                    continue
+                if category in state["broken_cats"]:
+                    continue
+                tool = state["tool"]
+                for param in params:
+                    if loop.time() >= deadline:
+                        return
+                    args: dict[str, Any] = {param: payload}
+                    timed_out = await self._fuzz_one(cli, writer, tool.name, category, args)
+                    if timed_out:
+                        state["broken_cats"].add(category)
+                        log.info(
+                            "fuzz.circuit_breaker_tripped",
+                            tool=tool.name,
+                            category=category,
+                            depth=depth,
+                            hint="Skipping remaining payloads in this category for this tool.",
+                        )
+                        break
+
+    async def _fuzz_one(
+        self,
+        cli: McpClient,
+        writer: EventWriter,
+        tool_name: str,
+        category: str,
+        arguments: dict[str, Any],
+    ) -> bool:
+        await writer.write(Event(
+            session_id=self._session_id,
+            source="test",
+            type="test_input",
+            data={
+                "sequence": self.name,
+                "tool": tool_name,
+                "category": category,
+                "arguments": _safe_dump(arguments),
+            },
+        ))
+
+        timed_out = False
+        outcome: str
+        # Refuse to send anything that wouldn't survive RFC 8259 — Python's
+        # default ``json.dumps`` emits ``Infinity`` / ``NaN`` literals that
+        # the server can't parse, which used to surface as a 15 s phantom
+        # timeout misclassified as a hang.
+        encoding_error = _json_encoding_error(arguments)
+        if encoding_error is not None:
+            resp_text = f"ClientSerializationError: {encoding_error}"
+            outcome = "client_serialization"
+        else:
+            try:
+                result = await asyncio.wait_for(
+                    cli.call_tool(tool_name, arguments), timeout=_CALL_TIMEOUT
+                )
+                resp_text = _safe_dump(result)
+                outcome = "server_response"
+            except ServerCrashError as exc:
+                # Tag the in-flight (tool, category) so the orchestrator can
+                # tell the restarted sequence to skip it instead of replaying
+                # the payload that just killed the server.
+                if not getattr(exc, "crash_signature", None):
+                    exc.crash_signature = (tool_name, category)  # type: ignore[attr-defined]
+                raise  # propagate immediately — do not record a fake test_result
+            except asyncio.TimeoutError:
+                resp_text = f"CallTimeout: no response within {_CALL_TIMEOUT:.0f}s"
+                timed_out = True
+                outcome = "client_timeout"
+                log.warning(
+                    "fuzz.call_timeout",
+                    tool=tool_name,
+                    category=category,
+                    timeout=_CALL_TIMEOUT,
+                )
+            except McpError as e:
+                resp_text = f"McpError({e.code}): {e.message}"
+                outcome = "server_error"
+            except Exception as e:
+                resp_text = f"Exception: {e}"
+                outcome = "client_exception"
+
+        await writer.write(Event(
+            session_id=self._session_id,
+            source="test",
+            type="test_result",
+            data={
+                "sequence": self.name,
+                "tool": tool_name,
+                "category": category,
+                "response_preview": resp_text[:2000],
+                # Distinguishes server-originated content from our own
+                # wrapper text (timeouts, serialisation errors, ...). Indicator
+                # matching MUST only run on server-sourced outcomes — otherwise
+                # our ``ClientSerializationError: ValueError: ...`` wrapper
+                # itself trips the ``valueerror`` indicator.
+                "outcome": outcome,
+                # Payload value as the analysis phase will see it — used by
+                # ``response_echoes_payload`` to detect generic reflection
+                # FPs (server rejects bad input by echoing it back, the echo
+                # carries our canary / RCE-string straight into indicator
+                # matching). Server-agnostic: works for any phrasing.
+                "payload_repr": _payload_repr(arguments),
+            },
+        ))
+        return timed_out
+
+    def _payload_groups(self, kind: str) -> list[tuple[str, list[Any]]]:
+        """Return ``[(category, [payloads...]), ...]`` in priority order.
+
+        Grouping by category lets the breadth-first executor run one payload
+        per category at depth=0, then a second one at depth=1, etc., so a
+        partial run still tests every category for every tool.
+        """
+        if kind == "string":
+            flat = self._build_string_payloads()
+        elif kind == "url":
+            flat = list(ssrf.generate_ssrf_payloads())
+        elif kind == "object":
+            flat = list(nosql_injection.generate_nosql_payloads())
+        else:
+            return []
+        # ``groupby`` preserves the input order, which is the priority order.
+        groups: list[tuple[str, list[Any]]] = []
+        for cat, items in groupby(flat, key=lambda x: x[0]):
+            groups.append((cat, [p for _, p in items]))
+        return groups
+
+    def _build_string_payloads(self) -> list[tuple[str, Any]]:
+        """Return ``(category, value)`` pairs in **risk-priority order**.
+
+        Categories are ordered so that the highest-impact / highest-precision
+        signals run first within each tool's time budget. If a tool's budget
+        is exhausted partway through, the categories most likely to surface
+        a real finding have already been tested.
+
+        Order rationale:
+          1. ``sql_injection``     — high precision (postgres / mysql error
+             patterns are unambiguous), critical impact for DB-bound MCPs.
+          2. ``command_injection`` — broadly applicable, ``uid=`` / ``uname``
+             output indicators are unambiguous.
+          3. ``rce_*``             — catastrophic when present; canary echo
+             is high precision after the response-filter cleanup.
+          4. ``path_traversal``    — broad coverage but many payloads (~70)
+             so it would otherwise hog the time budget.
+          5. ``type_confusion``    — many payloads, mostly noise (Pydantic
+             rejection); run late so it doesn't crowd out the others.
+          6. ``nosql_sql_like``    — niche.
+        """
+        out: list[tuple[str, Any]] = []
+        # 1. SQL injection
+        for p in sql_injection.PAYLOADS:
+            out.append(("sql_injection", p))
+        # 2. Command injection
+        for p in command_injection.PAYLOADS:
+            out.append(("command_injection", p))
+        # 3. RCE family (SSTI, eval sinks, JNDI, deserialise, YAML load, ...)
+        out.extend(rce.generate_rce_payloads())
+        # 4. Path traversal (large set)
+        for p in path_traversal.ALL_PAYLOADS:
+            out.append(("path_traversal", p))
+        # 5. Type confusion (largest set, lowest signal-to-noise)
+        out.extend(type_confusion.generate_type_payloads())
+        # 6. NoSQL operator smuggling
+        for p in nosql_injection.SQL_LIKE_NOSQL:
+            out.append(("nosql_sql_like", p))
+        return out
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Analysis-phase: Scanner
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class R5InputValidationScanner(BaseScanner):
+    """Analyse fuzzing results for signs of successful exploitation."""
+
+    @property
+    def name(self) -> str:
+        return "r5_input_validation"
+
+    @property
+    def risk_type(self) -> RiskType:
+        return RiskType.R5
+
+    async def analyze(self, ctx: AnalysisContext) -> list[Finding]:
+        findings: list[Finding] = []
+        reader = ctx.event_reader  # type: ignore[union-attr]
+
+        results: list[Event] = []
+        async for evt in reader.events_by_type("test_result"):
+            if evt.data.get("sequence") == "fuzz_input_validation":
+                results.append(evt)
+
+        # Pre-compute the set of retrieval-tool names so the per-event loop
+        # avoids re-doing the lookup for each result. Server name is fetched
+        # once from static_context (the analysis-phase view of serverInfo).
+        server_name = ""
+        if ctx.static_context:
+            server_name = str(ctx.static_context.get("server_name", "") or "")
+        retrieval_tools: set[str] = set()
+        for t in (ctx.tools or []):
+            if is_retrieval_tool(t, server_name):
+                retrieval_tools.add(t.name)
+
+        for evt in results:
+            cat = evt.data.get("category", "")
+            resp = evt.data.get("response_preview", "")
+            tool = evt.data.get("tool", "")
+            outcome = evt.data.get("outcome")  # None for legacy events
+            payload_repr = evt.data.get("payload_repr", "")  # "" for legacy events
+
+            finding = self._check(
+                cat, resp, tool, evt.event_id, outcome, payload_repr,
+                is_retrieval=tool in retrieval_tools,
+            )
+            if finding:
+                findings.append(finding)
+
+        return findings
+
+    def _check(
+        self,
+        category: str,
+        response: str,
+        tool_name: str,
+        event_id: str,
+        outcome: str | None = None,
+        payload_repr: str = "",
+        is_retrieval: bool = False,
+    ) -> Finding | None:
+
+        # Indicator matching is only meaningful on text the server actually
+        # produced. ``client_serialization`` / ``client_timeout`` /
+        # ``client_exception`` carry text we wrote ourselves (wrappers like
+        # ``ClientSerializationError: ValueError: ...``) — letting them
+        # through would falsely match e.g. the ``valueerror`` indicator on
+        # our own message. For legacy events with no ``outcome`` field the
+        # helper falls back to checking ``response`` for known client-wrapper
+        # prefixes.
+        if not is_server_outcome(outcome, response):
+            return None
+
+        # Mask the original payload inside the response before indicator
+        # matching. Any indicator that survives the mask is server-produced
+        # (real exploit output) rather than a literal echo of what we sent.
+        # Indicators ONLY appearing inside the echoed payload — the common
+        # "server rejected my input and reflected it" pattern — get masked
+        # out and stop matching.
+        masked = strip_payload_echo(response, payload_repr)
+
+        # Schema-level rejection short-circuit. Pydantic/JSONSchema responses
+        # echo the rejected input verbatim, which falsely matches every
+        # success heuristic below. The unhandled-error check at the bottom
+        # is still allowed to fire because Pydantic rejection is itself a
+        # *handled* error (structured response, not stack trace).
+        rejected = is_validation_rejection(response)
+
+        # Retrieval / search tools (``wikipedia-mcp``, ``arxiv-mcp-server``,
+        # ``fetch``, ``rss``, ``youtube-transcript`` ...) return external
+        # corpus content. That corpus legitimately reproduces every generic
+        # exploit indicator — Wikipedia's XXE article quotes
+        # ``file:///etc/passwd``, the passwd article describes the
+        # ``root:x:0:0`` format, PHP docs contain ``uid=``. ses-50a348b0:
+        # wikipedia-mcp emitted 3 CRITICAL FPs (RCE + path-traversal) on
+        # exactly this pattern. Content-keyword checks have no canary
+        # mechanism, so they're skipped on retrieval tools. The NoSQL-leak
+        # branch (structural over-broad query data) and type-confusion
+        # unhandled-error branch (response shape, not content) remain
+        # because their signals don't trip on corpus text. R2 keeps running
+        # its RCE check on these tools in *strict* (canary-only) mode —
+        # see ``r2_code_exec._check_rce_responses``.
+        if is_retrieval and category in ("path_traversal", "command_injection", "sql_injection"):
+            return None
+
+        if not rejected and category == "path_traversal" and path_traversal.looks_like_traversal_success(masked):
+            return Finding(
+                risk_type=RiskType.R5,
+                severity=Severity.CRITICAL,
+                confidence=0.9,
+                title=f"Path traversal succeeded on tool '{tool_name}'",
+                description="Fuzzing payload triggered disclosure of sensitive file content.",
+                related_events=[event_id],
+                tool_name=tool_name,
+                reproduction=f"Call tool '{tool_name}' with a path-traversal payload",
+            )
+
+        if not rejected and category == "command_injection" and command_injection.looks_like_injection_success(masked):
+            return Finding(
+                risk_type=RiskType.R5,
+                severity=Severity.CRITICAL,
+                confidence=0.9,
+                title=f"Command injection succeeded on tool '{tool_name}'",
+                description="Fuzzing payload caused command execution output in response.",
+                related_events=[event_id],
+                tool_name=tool_name,
+                reproduction=f"Call tool '{tool_name}' with a command-injection payload",
+            )
+
+        # SQL "error leak" is by definition error-shaped output. A successful
+        # tool response whose data happens to contain SQL keywords (template
+        # search returning a workflow titled "PostgreSQL Sandbox", a doc tool
+        # whose result text describes ``syntax error at or near``, etc.) is
+        # not a leak — it's just data. ses-121a3dbc regression: n8n-mcp's
+        # ``search_templates`` returned a workflow list including a template
+        # named "Generate & Test SQL Code with ... PostgreSQL Sandbox" → the
+        # plain ``postgresql`` substring fired FP. Gate on clean envelope to
+        # require the response to actually be (or look like) an error.
+        if (
+            category == "sql_injection"
+            and not is_clean_success_envelope(response)
+            and sql_injection.looks_like_sql_error(masked)
+        ):
+            return Finding(
+                risk_type=RiskType.R5,
+                severity=Severity.HIGH,
+                confidence=0.75,
+                title=f"SQL error leaked on tool '{tool_name}'",
+                description="SQL injection payload triggered a database error in the response.",
+                related_events=[event_id],
+                tool_name=tool_name,
+                reproduction=f"Call tool '{tool_name}' with a SQL-injection payload",
+            )
+
+        if not rejected and category.startswith("ssrf_") and ssrf.looks_like_ssrf_success(masked):
+            return Finding(
+                risk_type=RiskType.R5,
+                severity=Severity.CRITICAL,
+                confidence=0.85,
+                title=f"SSRF succeeded on tool '{tool_name}'",
+                description="Server-side request forgery: tool fetched internal/metadata endpoint.",
+                related_events=[event_id],
+                tool_name=tool_name,
+                reproduction=f"Call tool '{tool_name}' with an SSRF URL payload",
+            )
+
+        if not rejected and (category.startswith("nosql_") or category == "nosql_sql_like"):
+            # Same gate as SQL above. NoSQL "error" indicators include some
+            # very generic strings (``syntax error``, ``compile error``,
+            # ``loading``, ``did you mean``, ``field "``) that legitimate
+            # template / documentation / search-result content reproduces
+            # constantly — without the clean-envelope gate, n8n-mcp's
+            # ``search_templates`` would emit a NoSQL-error FP for almost
+            # any non-trivial response. For *retrieval* tools the same
+            # generic strings appear all over the corpus too, with no
+            # canary discriminator — skip the error branch entirely.
+            if (
+                not is_retrieval
+                and not is_clean_success_envelope(response)
+                and nosql_injection.looks_like_nosql_error(masked)
+            ):
+                return Finding(
+                    risk_type=RiskType.R5,
+                    severity=Severity.HIGH,
+                    confidence=0.8,
+                    title=f"NoSQL error leaked on tool '{tool_name}'",
+                    description="NoSQL injection payload triggered a backend error.",
+                    related_events=[event_id],
+                    tool_name=tool_name,
+                    reproduction=f"Call tool '{tool_name}' with a NoSQL operator payload",
+                )
+            # ``looks_like_nosql_leak`` is an *exploitation-success* indicator
+            # (the response contains over-broad query data — admin role flags,
+            # bulk document dumps). Those legitimately appear in clean success
+            # envelopes, so the clean-envelope gate does NOT apply here.
+            if nosql_injection.looks_like_nosql_leak(masked):
+                return Finding(
+                    risk_type=RiskType.R5,
+                    severity=Severity.CRITICAL,
+                    confidence=0.85,
+                    title=f"NoSQL injection data leak on tool '{tool_name}'",
+                    description="NoSQL injection payload caused over-broad query result.",
+                    related_events=[event_id],
+                    tool_name=tool_name,
+                    reproduction=f"Call tool '{tool_name}' with a NoSQL injection payload",
+                )
+
+        # RCE / SSTI / eval / JNDI / deserialise / YAML-load / XXE detection
+        # is owned by ``R2CodeExecScanner._check_rce_responses`` — running the
+        # same indicator check here too produced duplicate findings (one R2,
+        # one R5 with no category label, both pointing at the same events) in
+        # ses-45ee8108. ``R2`` is the correct risk axis for code-execution
+        # outcomes; ``R5`` keeps the remaining input-handling checks below.
+
+        # Type-confusion: all categories including new ones. Skip when:
+        #  * the response is a clean, successful structured result — a server
+        #    that returns data isn't malfunctioning, whatever error-looking
+        #    strings the returned content carries (``search_issues`` returning
+        #    a GitHub issue titled "Cannot read properties of undefined"); or
+        #  * the response is a *handled* tool error (FastMCP ``isError: true``
+        #    "Error executing tool X: <exc>") — a caught-and-returned exception
+        #    is, by definition, not an *unhandled* error.
+        if (
+            not is_clean_success_envelope(response)
+            and not is_handled_tool_error(response)
+            and type_confusion.looks_like_unhandled_error(masked)
+        ):
+            return Finding(
+                risk_type=RiskType.R5,
+                severity=Severity.MEDIUM,
+                confidence=0.7,
+                title=f"Unhandled error on type-confusion input for '{tool_name}'",
+                description=f"Category '{category}' caused an unhandled exception.",
+                related_events=[event_id],
+                tool_name=tool_name,
+                reproduction=f"Call tool '{tool_name}' with type-confusion input",
+            )
+
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _string_param_names(tool: ToolInfo) -> list[str]:
+    """Extract parameter names that accept string values from JSON Schema."""
+    schema = tool.input_schema or {}
+    props = schema.get("properties", {})
+    return [k for k, v in props.items() if isinstance(v, dict) and v.get("type") == "string"]
+
+
+def _url_param_names(tool: ToolInfo) -> list[str]:
+    """Extract string parameters whose name or format hints at a URL."""
+    schema = tool.input_schema or {}
+    props = schema.get("properties", {})
+    url_hints = {"url", "uri", "endpoint", "href", "link", "src", "source", "target", "fetch", "remote"}
+    result = []
+    for k, v in props.items():
+        if not isinstance(v, dict):
+            continue
+        if v.get("format") == "uri":
+            result.append(k)
+        elif v.get("type") == "string" and any(h in k.lower() for h in url_hints):
+            result.append(k)
+    return result
+
+
+def _object_param_names(tool: ToolInfo) -> list[str]:
+    """Extract parameter names that accept object/any types (NoSQL targets)."""
+    schema = tool.input_schema or {}
+    props = schema.get("properties", {})
+    return [
+        k for k, v in props.items()
+        if isinstance(v, dict) and v.get("type") in ("object", None)
+        and "properties" not in v  # skip nested structured schemas
+    ]
+
+
+def _safe_dump(obj: Any) -> str:
+    """JSON-serialise, falling back to str() for non-serialisable values."""
+    try:
+        return json.dumps(obj, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return str(obj)
+
+
+def _payload_repr(arguments: dict[str, Any]) -> str:
+    """Stable string of the payload values for substring reflection check.
+
+    We strip the ``{"<param>":`` wrapper because the response usually echoes
+    only the inner *value* (e.g. ``Repository path '<value>' is outside``),
+    not the full key+value JSON. Joining values with a separator keeps
+    multi-param payloads searchable too.
+    """
+    parts: list[str] = []
+    for v in arguments.values():
+        if isinstance(v, str):
+            parts.append(v)
+        else:
+            try:
+                parts.append(json.dumps(v, ensure_ascii=False, default=str))
+            except (TypeError, ValueError):
+                parts.append(str(v))
+    return "\n".join(parts)[:4000]
+
+
+def _json_encoding_error(obj: Any) -> str | None:
+    """Return an error message if *obj* can't be sent on the JSON-RPC wire.
+
+    Mirrors the gate in R6 (``r6_stability._json_encoding_error``). Uses
+    ``allow_nan=False`` to catch ``float('inf')`` / ``NaN`` here so the
+    fuzzer records a ``ClientSerializationError`` instead of letting the
+    payload reach the wire as an ``Infinity`` literal — which Node-side
+    JSON.parse rejects, producing a 15 s phantom timeout that misclassifies
+    as a server hang.
+    """
+    try:
+        json.dumps(obj, ensure_ascii=False, allow_nan=False)
+        return None
+    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+        return f"{type(exc).__name__}: {exc}"
