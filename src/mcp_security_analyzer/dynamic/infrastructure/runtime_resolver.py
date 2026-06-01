@@ -25,6 +25,7 @@ from pathlib import Path
 
 import structlog
 
+from mcp_security_analyzer.common.environment_snapshot import EnvironmentSnapshot
 from mcp_security_analyzer.dynamic.config import ServerConfig
 
 log = structlog.get_logger()
@@ -131,14 +132,7 @@ def _node_profile_from_manifest(manifest_dir: Path) -> str | None:
     except (OSError, ValueError):
         return None
     engines = (data.get("engines") or {}).get("node", "")
-    # engines.node is a semver range; we only care about the major floor.
-    m = re.search(r"(\d+)", engines)
-    if not m:
-        return None
-    major = int(m.group(1))
-    if major <= 20:
-        return "node20"
-    return "node22"
+    return _node_profile_from_constraint(engines)
 
 
 def _python_profile_from_manifest(manifest_dir: Path) -> str | None:
@@ -153,7 +147,32 @@ def _python_profile_from_manifest(manifest_dir: Path) -> str | None:
     except (OSError, ValueError, ImportError):
         return None
     req = (data.get("project") or {}).get("requires-python", "")
-    m = re.search(r"3\.(\d+)", req)
+    return _python_profile_from_constraint(req)
+
+
+def _node_profile_from_constraint(engines_node: str | None) -> str | None:
+    """Pick a node profile from a raw ``engines.node`` constraint string.
+
+    Same major-version-floor logic the manifest reader uses, but takes the
+    raw string directly so callers with pre-parsed constraints (e.g. an
+    environment snapshot) can reuse it.
+    """
+    if not engines_node:
+        return None
+    m = re.search(r"(\d+)", engines_node)
+    if not m:
+        return None
+    major = int(m.group(1))
+    if major <= 20:
+        return "node20"
+    return "node22"
+
+
+def _python_profile_from_constraint(requires_python: str | None) -> str | None:
+    """Pick a python profile from a raw ``requires-python`` constraint string."""
+    if not requires_python:
+        return None
+    m = re.search(r"3\.(\d+)", requires_python)
     if not m:
         return None
     minor = int(m.group(1))
@@ -175,7 +194,11 @@ class RuntimeResolver:
 
     _OVERRIDE_ENV = "MCP_SANDBOX_PROFILE"
 
-    def resolve(self, server: ServerConfig) -> ResolvedRuntime:
+    def resolve(
+        self,
+        server: ServerConfig,
+        snapshot: EnvironmentSnapshot | None = None,
+    ) -> ResolvedRuntime:
         # 1. Explicit override via env var — escape hatch for users who know
         #    their server needs a specific profile we can't auto-detect.
         override = server.env.get(self._OVERRIDE_ENV)
@@ -189,35 +212,71 @@ class RuntimeResolver:
             )
 
         kind = _classify_command(server.command)
-        manifest_dir = _find_manifest_dir(server.args)
+
+        # When the static analyzer has supplied raw runtime constraints, prefer
+        # those over reading a manifest off disk. The constraints are the same
+        # ``engines.node`` / ``requires-python`` strings — we just got them
+        # from a different source (a published tarball, or the static side's
+        # deeper local scan).
+        snap_node = snapshot.engines_node if snapshot else None
+        snap_python = snapshot.requires_python if snapshot else None
+
+        manifest_dir = None
+        if not snap_node and not snap_python:
+            manifest_dir = _find_manifest_dir(server.args)
 
         # 2a. Node family.
         if kind == "node":
             profile = (
-                _node_profile_from_manifest(manifest_dir) if manifest_dir else None
-            ) or DEFAULT_NODE
+                _node_profile_from_constraint(snap_node)
+                or (_node_profile_from_manifest(manifest_dir) if manifest_dir else None)
+                or DEFAULT_NODE
+            )
+            reason = f"node command '{_basename(server.command)}' → {profile}"
+            if snap_node:
+                reason += f" (snapshot engines.node={snap_node!r})"
             return ResolvedRuntime(
                 image=f"mcp-sandbox-{profile}",
                 command=self._normalise_command(server.command, profile),
-                reason=f"node command '{_basename(server.command)}' → {profile}",
+                reason=reason,
             )
 
-        # 2b. Python family: prefer explicit python3.X in command, then manifest.
+        # 2b. Python family: prefer explicit python3.X in command, then snapshot,
+        #     then manifest.
         if kind == "python":
             profile = (
                 _python_version_from_command(server.command)
+                or _python_profile_from_constraint(snap_python)
                 or (_python_profile_from_manifest(manifest_dir) if manifest_dir else None)
                 or DEFAULT_PYTHON
             )
+            reason = f"python command '{_basename(server.command)}' → {profile}"
+            if snap_python:
+                reason += f" (snapshot requires-python={snap_python!r})"
             return ResolvedRuntime(
                 image=f"mcp-sandbox-{profile}",
                 command=self._normalise_command(server.command, profile),
-                reason=f"python command '{_basename(server.command)}' → {profile}",
+                reason=reason,
             )
 
-        # 3. Manifest sniffing even when the command itself is ambiguous
-        #    (e.g. a shell wrapper). Python manifest wins if both exist because
-        #    python MCP servers more often ship with a wrapper script.
+        # 3. Ambiguous command. Snapshot-derived constraint wins if present;
+        #    otherwise fall back to manifest sniffing in the same priority order
+        #    (python first because python MCP servers more often ship with
+        #    wrapper scripts).
+        snap_py_profile = _python_profile_from_constraint(snap_python)
+        if snap_py_profile:
+            return ResolvedRuntime(
+                image=f"mcp-sandbox-{snap_py_profile}",
+                command=server.command,
+                reason=f"snapshot requires-python={snap_python!r} → {snap_py_profile}",
+            )
+        snap_node_profile = _node_profile_from_constraint(snap_node)
+        if snap_node_profile:
+            return ResolvedRuntime(
+                image=f"mcp-sandbox-{snap_node_profile}",
+                command=server.command,
+                reason=f"snapshot engines.node={snap_node!r} → {snap_node_profile}",
+            )
         if manifest_dir is not None:
             py_profile = _python_profile_from_manifest(manifest_dir)
             if py_profile:

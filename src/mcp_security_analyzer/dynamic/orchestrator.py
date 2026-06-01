@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import structlog
 
+from mcp_security_analyzer.common.environment_snapshot import EnvironmentSnapshot
 from mcp_security_analyzer.dynamic.config import AnalysisConfig
 from mcp_security_analyzer.dynamic.correlation.event_store import EventStore
 from mcp_security_analyzer.dynamic.infrastructure.honeypot import Honeypot
@@ -99,6 +100,7 @@ async def run_analysis(
     use_docker: bool = True,
     extra_sequences: list[TestSequence] | None = None,
     scanners: list[BaseScanner] | None = None,
+    environment_snapshot: EnvironmentSnapshot | None = None,
 ) -> AnalysisOutput:
     """Execute the full collection → analysis → export pipeline."""
     session_id = _session_id()
@@ -128,6 +130,7 @@ async def run_analysis(
             sequences=sequences,
             use_docker=use_docker,
             trusted_internal_ips=trusted_internal_ips,
+            environment_snapshot=environment_snapshot,
         )
     except RuntimeError as exc:
         # Server process exited immediately (startup failure).
@@ -172,6 +175,7 @@ async def run_analysis(
                     env_override=env_override,
                     variation_tag=tag,
                     trusted_internal_ips=trusted_internal_ips,
+                    environment_snapshot=environment_snapshot,
                 )
             except RuntimeError as exc:
                 log.warning(
@@ -259,6 +263,7 @@ async def run_analysis(
             "tools_tested": len(tools),
             "total_events": event_count,
         },
+        tools=tools,
     )
 
     exporter = Exporter()
@@ -283,6 +288,7 @@ async def _collect(
     env_override: dict[str, str] | None = None,
     variation_tag: str | None = None,
     trusted_internal_ips: set[str] | None = None,
+    environment_snapshot: EnvironmentSnapshot | None = None,
 ) -> list[ToolInfo]:
     """Run collection sequences inside a sandbox, return discovered tools.
 
@@ -351,6 +357,7 @@ async def _collect(
                 use_docker=use_docker,
                 sysmon_enabled=sysmon_enabled,
                 prereq_hint=prereq_hint,
+                environment_snapshot=environment_snapshot,
             ) as sandbox:
                 # Capture sidecar IPs as soon as the sandbox is up — they
                 # exist for the duration of the ``async with`` block and

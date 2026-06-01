@@ -29,10 +29,15 @@ from pathlib import Path
 
 import structlog
 
+from mcp_security_analyzer.common.environment_snapshot import (
+    EnvironmentSnapshot,
+    SnapshotOrigin,
+)
 from mcp_security_analyzer.dynamic.config import ServerConfig
 from mcp_security_analyzer.dynamic.infrastructure.recipes import (
     ArgRewrite,
     MatchContext,
+    RecipeAction,
     RecipeRegistry,
     ServiceSpec,
 )
@@ -81,7 +86,16 @@ _PYPI_API_TIMEOUT = 15
 
 @dataclass(frozen=True)
 class BootstrapAction:
-    """A prerequisite installation step layered onto a base sandbox image."""
+    """A prerequisite installation step layered onto a base sandbox image.
+
+    ``command_wrapper`` is prepended to the MCP server command at run time —
+    used by package-runner pre-install actions to insert a tiny shim that
+    stages a pre-built ``node_modules`` into the cwd so ``npx <pkg>`` finds
+    the package locally and skips the registry. See
+    ``_remote_install_action`` for the rationale (npm 10+ ``npx`` issues a
+    manifest probe to ``registry.npmjs.org`` even for globally-installed
+    packages, and the sidecar's ``--internal`` network blocks it).
+    """
 
     action_id: str
     description: str
@@ -89,6 +103,7 @@ class BootstrapAction:
     env: tuple[tuple[str, str], ...] = ()
     services: tuple[ServiceSpec, ...] = ()
     arg_rewrites: tuple[ArgRewrite, ...] = ()
+    command_wrapper: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -171,6 +186,38 @@ class PreflightEvidence:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _evidence_from_snapshot(snapshot: EnvironmentSnapshot) -> PreflightEvidence | None:
+    """Convert a static-analyzer snapshot into the dynamic side's evidence shape.
+
+    Source label mapping:
+    - LOCAL_SOURCE → ``"local-manifest"``. This makes the snapshot a drop-in
+      replacement for the existing local-disk inspection path, including
+      activating ``_local_install_action`` so the manifest's declared deps
+      get installed into the sandbox image.
+    - EXTRACTED_TARBALL → ``"extracted-tarball:<package_name>"``. A distinct
+      label so dynamic-side branches that gate specifically on
+      ``"local-manifest"`` do not fire — the package's own preinstall path
+      (``_remote_install_action``) is the right install mechanism here.
+    - MANIFEST_ONLY / NONE → ``None``; let the dynamic side fall back.
+    """
+    origin = snapshot.origin
+    if origin == SnapshotOrigin.LOCAL_SOURCE:
+        source = "local-manifest"
+    elif origin == SnapshotOrigin.EXTRACTED_TARBALL:
+        source = f"extracted-tarball:{snapshot.package_name or 'unknown'}"
+    else:
+        return None
+    return PreflightEvidence(
+        source=source,
+        manifest_path=snapshot.manifest_label,
+        package_name=snapshot.package_name,
+        package_version=snapshot.package_version,
+        node_dependencies=snapshot.node_dependencies,
+        python_dependencies=snapshot.python_dependencies,
+        source_signals=tuple(sorted(snapshot.source_signals)),
+    )
+
+
 class SourcePreflightInspector:
     """Inspect local manifests or remote registry metadata before server start.
 
@@ -184,8 +231,20 @@ class SourcePreflightInspector:
         runtime: ResolvedRuntime,  # kept for API compatibility; runtime selection now uses recipe matching
         *,
         network_mode: str = "allowlist",
+        snapshot: EnvironmentSnapshot | None = None,
     ) -> PreflightEvidence | None:
         _ = runtime
+
+        # If the static analyzer already collected this information (manifest
+        # deps + source signals), use it directly and skip disk reads / network
+        # calls entirely. This is how dynamic gets the right environment on
+        # the first attempt for remote packages — the static side downloaded
+        # and analyzed the tarball, we just consume that result.
+        if snapshot is not None and not snapshot.is_empty:
+            evidence = _evidence_from_snapshot(snapshot)
+            if evidence is not None:
+                return evidence
+
         local = _inspect_local_manifests(server)
         if local is not None:
             return local
@@ -342,6 +401,166 @@ def _local_install_action(evidence: PreflightEvidence | None) -> BootstrapAction
     )
 
 
+# stderr substrings that mean "the server tried to fetch from a package
+# registry and DNS / network refused". Matched case-insensitively. Covers
+# both npm (EAI_AGAIN / registry.npmjs.org) and pip (pypi.org / glibc DNS
+# error strings). Kept deliberately small — broader patterns risk false
+# positives that would force unrelated rebuilds.
+_REGISTRY_FETCH_FAILURE_TOKENS: tuple[str, ...] = (
+    "registry.npmjs.org",
+    "pypi.org",
+    "eai_again",
+    "getaddrinfo",
+    "temporary failure in name resolution",
+    "name or service not known",
+)
+
+
+def _is_registry_fetch_failure(stderr_snippet: str | None) -> bool:
+    if not stderr_snippet:
+        return False
+    lowered = stderr_snippet.lower()
+    return any(token in lowered for token in _REGISTRY_FETCH_FAILURE_TOKENS)
+
+
+def _remote_install_action(
+    server: ServerConfig,
+    matched: list[RecipeAction],
+    stderr_snippet: str | None = None,
+) -> BootstrapAction | None:
+    """Bake a package-runner server's own package into the sandbox image.
+
+    A server launched as ``npx <pkg>`` / ``uvx <pkg>`` fetches its package from
+    the registry on first run. That is fine on a normal bridged network, but
+    the moment a matched recipe pulls in a sidecar backend the MCP server is
+    moved onto an ``--internal`` docker network (see
+    ``SandboxSession._create_sidecar_network``) with no route to the host or
+    the internet. The runtime ``npx`` fetch then dies with ``getaddrinfo
+    EAI_AGAIN`` and the server never starts — the whole scan crash-loops.
+
+    Two gates fire this step:
+
+    * **Proactive** — a matched recipe carries a sidecar, so we *know* the
+      runtime network will be ``--internal`` and pre-install up front. This is
+      the generic counterpart to the per-server ``*-install`` recipes in
+      ``builtin.yaml`` (postgres shipped one; redis/mysql/mongodb did not —
+      the original bug this closes).
+    * **Reactive** — ``stderr_snippet`` from a failed first spawn shows a
+      registry DNS/network error. This fires on the retry path
+      (``Sandbox._retry_bootstrap_from_stderr``) and catches cases the
+      proactive gate misses: ``network.mode=none``, in-process wrapper scripts
+      that shell out to ``npx`` for a sub-tool, etc. Action ID is stable, so
+      if proactive already installed the package the retry's
+      ``action_id not in current_ids`` dedup skips it cleanly.
+
+    Returns ``None`` when neither gate fires, when the command is not a
+    recognised package runner, or when a matched recipe already installs the
+    same package (so we never lay down a duplicate layer).
+    """
+    needs_offline_install = (
+        any(action.services for action in matched)
+        or _is_registry_fetch_failure(stderr_snippet)
+    )
+    if not needs_offline_install:
+        return None
+
+    node_spec = _extract_node_package_spec(server)
+    python_spec = _extract_python_package_spec(server)
+    spec = node_spec or python_spec
+    if spec is None:
+        return None
+
+    # A per-server recipe (e.g. postgres-mcp-node-install) may already install
+    # this exact package — don't stack a redundant RUN layer on top of it.
+    if any(spec in line for action in matched for line in action.dockerfile_lines):
+        return None
+
+    quoted = shlex.quote(spec)
+    env_pairs: tuple[tuple[str, str], ...] = ()
+    command_wrapper: tuple[str, ...] = ()
+    if node_spec is not None:
+        # Plain ``npm install -g`` is not enough and neither is sharing the
+        # npm cache + ``NPM_CONFIG_PREFER_OFFLINE``: empirically (npm 10 on
+        # node:22-bookworm-slim) ``npx <pkg>`` *still* issues a manifest probe
+        # to ``registry.npmjs.org`` for globally-installed scoped packages,
+        # going around the cache. That probe is exactly what dies with
+        # EAI_AGAIN on the sidecar's ``--internal`` network.
+        #
+        # What does work: putting the package in the *cwd's* ``node_modules``
+        # tree so npx's local-resolution path matches and the manifest probe
+        # never happens. The cwd is a tmpfs at ``/tmp`` (so it starts empty
+        # every container start), so we stage the install in
+        # ``/opt/mcp-prebuilt`` at image-build time and use a tiny entrypoint
+        # shim to ``cp -a`` it into cwd before the user's command runs. The
+        # shim is wired in via ``command_wrapper`` (see ``Sandbox._build_docker
+        # _cmd``) so npx's argv stays untouched.
+        dockerfile_lines: tuple[str, ...] = (
+            "USER root",
+            (
+                "RUN mkdir -p /opt/mcp-prebuilt "
+                "&& cd /opt/mcp-prebuilt "
+                "&& printf '%s' "
+                "'{\"name\":\"mcp-prebuilt\",\"version\":\"0.0.0\",\"private\":true}' "
+                "> package.json "
+                f"&& npm install --no-audit --no-fund --no-package-lock {quoted} "
+                "&& chmod -R a+rX /opt/mcp-prebuilt"
+            ),
+            # Heredoc-free shim emit so this stays a single Dockerfile RUN.
+            # The shim is best-effort: ``cp -a`` failures (e.g. a partial
+            # earlier copy leaving entries in place) are tolerated so the
+            # server still exec's — if the copy genuinely fails, npx will
+            # surface the original registry error, which is the truthful
+            # signal anyway.
+            (
+                "RUN { printf '%s\\n' "
+                "'#!/bin/sh' "
+                "'if [ -d /opt/mcp-prebuilt ] && [ ! -e ./node_modules ]; then' "
+                "'    cp -a /opt/mcp-prebuilt/. . 2>/dev/null || true' "
+                "'fi' "
+                "'exec \"$@\"' "
+                "; } > /usr/local/bin/mcp-prebuilt-shim "
+                "&& chmod a+rx /usr/local/bin/mcp-prebuilt-shim"
+            ),
+            "USER user",
+        )
+        # Belt-and-suspenders: even though the local resolution should skip
+        # the registry, set PREFER_OFFLINE so any *secondary* npm/npx call
+        # the package might make (transitive scripts, etc.) also avoids the
+        # registry on the --internal network.
+        env_pairs = (("NPM_CONFIG_PREFER_OFFLINE", "true"),)
+        command_wrapper = ("/usr/local/bin/mcp-prebuilt-shim",)
+        registry = "npm"
+    else:
+        # NOTE: this covers ``uvx <pkg>`` / ``pipx <pkg>`` invocations whose
+        # spec _extract_python_package_spec returns; both create their own
+        # ephemeral venv and would re-fetch from PyPI even when the system
+        # interpreter has the package installed. A fully offline-safe python
+        # branch needs ``uv tool install`` / ``pipx install`` + a shared uv /
+        # pipx home — left as a follow-up since the reported crash is npm.
+        dockerfile_lines = (
+            "USER root",
+            f"RUN pip install --no-cache-dir {quoted}",
+            "USER user",
+        )
+        registry = "PyPI"
+
+    # Hash the *recipe* (dockerfile + env + wrapper), not just the spec, so
+    # any future tweak to the install pattern auto-invalidates a previously-
+    # built bootstrap image rather than silently reusing a stale broken layer.
+    recipe_payload = repr((spec, dockerfile_lines, env_pairs, command_wrapper))
+    digest = hashlib.sha256(recipe_payload.encode()).hexdigest()[:12]
+    return BootstrapAction(
+        action_id=f"remote-install-{digest}",
+        description=(
+            f"pre-install {registry} package '{spec}' so the sidecar-isolated "
+            "server need not reach the registry at run time"
+        ),
+        dockerfile_lines=dockerfile_lines,
+        env=env_pairs,
+        command_wrapper=command_wrapper,
+    )
+
+
 def plan_bootstrap(
     server: ServerConfig,
     runtime: ResolvedRuntime,
@@ -370,11 +589,24 @@ def plan_bootstrap(
     if local_action is not None:
         actions.append(local_action)
 
+    # Generic remote package-runner install — a sidecar-bound npx/uvx server
+    # must have its package baked in before the --internal network cuts off
+    # the registry. Also fires reactively when ``stderr_snippet`` shows a
+    # registry DNS/network failure, so the retry path
+    # (``Sandbox._retry_bootstrap_from_stderr``) can recover servers the
+    # proactive gate missed. Passed the matched recipes so it can dedup
+    # against any per-server install recipe that already covers the package.
+    remote_action = _remote_install_action(server, matched, stderr_snippet)
+    if remote_action is not None:
+        actions.append(remote_action)
+
     if not actions:
         return None
     reasons = [a.description for a in matched]
     if local_action is not None:
         reasons.append(local_action.description)
+    if remote_action is not None:
+        reasons.append(remote_action.description)
     return BootstrapPlan(actions=tuple(actions), reason=", ".join(reasons))
 
 

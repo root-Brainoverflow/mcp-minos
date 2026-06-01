@@ -1,0 +1,49 @@
+rules:
+  # ── Secret-shaped environment variable access ──────────────────────────────
+  - id: mcp-r1-env-secret-access
+    languages: [python]
+    severity: INFO
+    message: >
+      Reads a secret-shaped environment variable. Legitimate for many servers,
+      but flagged so exfiltration scanners can correlate (R1).
+    metadata:
+      risk: R1
+      confidence: low
+    patterns:
+      - pattern-either:
+          - pattern: os.environ[$K]
+          - pattern: os.environ.get($K, ...)
+          - pattern: os.getenv($K, ...)
+      - metavariable-regex:
+          metavariable: $K
+          regex: (?i)("|')?.*(secret|token|api[_-]?key|password|passwd|credential).*
+
+  - id: mcp-r1-env-secret-access-node
+    languages: [javascript, typescript]
+    severity: INFO
+    message: >
+      Reads a secret-shaped property of process.env. Flagged for correlation
+      with exfiltration signals (R1).
+    metadata:
+      risk: R1
+      confidence: low
+    patterns:
+      - pattern-regex: 'process\.env\.\w*(?i:secret|token|api_?key|password|passwd|credential)\w*'
+
+  # ── Broad filesystem reads from a sensitive root ───────────────────────────
+  - id: mcp-r1-broad-file-read
+    languages: [python]
+    severity: WARNING
+    message: >
+      Broad filesystem traversal starting from a system root. Reading large
+      swaths of the filesystem is an R1 data-access risk.
+    metadata:
+      risk: R1
+      confidence: low
+    patterns:
+      - pattern-either:
+          - pattern: os.walk("/")
+          - pattern: os.walk("/etc")
+          - pattern: os.walk("$HOME")
+          - pattern: glob.glob("/**")
+          - pattern: glob.glob("/**/*", recursive=True)

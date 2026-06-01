@@ -1,0 +1,59 @@
+rules:
+  # ── Sandbox / CI / debug detection used as a branch condition ──────────────
+  - id: mcp-r4-sandbox-detection-python
+    languages: [python]
+    severity: WARNING
+    message: >
+      Branches on a sandbox/CI/debug environment variable. Code that behaves
+      differently when it detects an analysis environment is an anti-sandbox
+      deception signal (R4).
+    metadata:
+      risk: R4
+      confidence: medium
+    patterns:
+      - pattern-either:
+          - pattern: os.environ.get($K, ...)
+          - pattern: os.getenv($K, ...)
+          - pattern: os.environ[$K]
+      - metavariable-regex:
+          metavariable: $K
+          regex: (?i)("|')?(sandbox|docker|ci|debug|test|pytest|container|kubernetes).*
+
+  - id: mcp-r4-sandbox-detection-node
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >
+      Reads a sandbox/CI/debug environment variable, often used to alter
+      behaviour under analysis (R4).
+    metadata:
+      risk: R4
+      confidence: medium
+    patterns:
+      - pattern-regex: 'process\.env\.(?i:SANDBOX|DOCKER|CI|DEBUG|TEST|CONTAINER|KUBERNETES)\w*'
+
+  # ── Time-based conditional behaviour (logic bombs) ─────────────────────────
+  - id: mcp-r4-time-conditional-python
+    languages: [python]
+    severity: INFO
+    message: >
+      Branches on the current date/time. Time-gated behaviour can hide a logic
+      bomb that activates after a delay (R4).
+    metadata:
+      risk: R4
+      confidence: low
+    patterns:
+      - pattern-either:
+          - pattern: "if datetime.now() > $T: ..."
+          - pattern: "if datetime.datetime.now() > $T: ..."
+          - pattern: "if time.time() > $T: ..."
+
+  - id: mcp-r4-time-conditional-node
+    languages: [javascript, typescript]
+    severity: INFO
+    message: >
+      Branches on the current date/time, which can gate a delayed payload (R4).
+    metadata:
+      risk: R4
+      confidence: low
+    patterns:
+      - pattern: if (Date.now() > $T) { ... }

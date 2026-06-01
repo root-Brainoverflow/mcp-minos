@@ -124,6 +124,10 @@ class AnalysisOutput(BaseModel):
     event_log_path: str
     dynamic_risk_scores: dict[str, float]
     metadata: dict
+    # Tool definitions captured at runtime (initialize → tools/list). Carried
+    # through to the reporter so the static-side description / schema scanners
+    # can run on the authoritative tool list after dynamic collection ends.
+    tools: list[ToolInfo] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

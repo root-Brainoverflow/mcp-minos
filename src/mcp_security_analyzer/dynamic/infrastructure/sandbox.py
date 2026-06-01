@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import os
 import re
 import shutil
 import tempfile
@@ -30,6 +29,7 @@ from typing import Any
 
 import structlog
 
+from mcp_security_analyzer.common.environment_snapshot import EnvironmentSnapshot
 from mcp_security_analyzer.dynamic.config import SandboxConfig, ServerConfig
 from mcp_security_analyzer.dynamic.infrastructure.bootstrap import (
     BootstrapAction,
@@ -280,6 +280,7 @@ class Sandbox:
         runtime_resolver: RuntimeResolver | None = None,
         preflight_inspector: SourcePreflightInspector | None = None,
         prereq_hint: str | None = None,
+        environment_snapshot: EnvironmentSnapshot | None = None,
     ) -> None:
         self._server = server_config
         self._sandbox = sandbox_config
@@ -292,6 +293,11 @@ class Sandbox:
         # re-resolves it via recipe ``stderr_tokens_any`` and the apt heuristic
         # so the rebuilt image has the fix baked in *before* the server runs.
         self._prereq_hint = prereq_hint
+        # Pre-computed environment information from the static analyzer. When
+        # supplied, the runtime resolver and preflight inspector use it instead
+        # of doing their own manifest reads / registry queries. None falls back
+        # to the discovery logic.
+        self._environment_snapshot = environment_snapshot
         self._resolver = runtime_resolver or RuntimeResolver()
         self._preflight = (
             preflight_inspector or SourcePreflightInspector()
@@ -677,7 +683,10 @@ class Sandbox:
     def _resolve_runtime(self) -> ResolvedRuntime:
         """Resolve and cache the runtime profile for this sandbox."""
         if self._resolved is None:
-            self._resolved = self._resolver.resolve(self._server)
+            self._resolved = self._resolver.resolve(
+                self._server,
+                snapshot=self._environment_snapshot,
+            )
             log.info(
                 "sandbox.runtime_resolved",
                 selected=(
@@ -846,6 +855,13 @@ class Sandbox:
             cmd += ["-p", f"127.0.0.1:{self._server.http_port}:{self._server.http_port}/tcp"]
 
         cmd.append(image)
+        # Bootstrap actions may prepend a wrapper (e.g. the prebuilt-node-modules
+        # shim from ``_remote_install_action``) before the actual server cmd.
+        # Multiple wrappers stack outermost-first so the first action's wrapper
+        # runs first and exec's the rest. Plain actions contribute nothing.
+        for action in (self._bootstrap_plan.actions if self._bootstrap_plan else ()):
+            if action.command_wrapper:
+                cmd += list(action.command_wrapper)
         cmd.append(server_cmd)
         cmd += remapped_args
 
@@ -865,6 +881,7 @@ class Sandbox:
             self._server,
             runtime,
             network_mode=self._sandbox.network.mode,
+            snapshot=self._environment_snapshot,
         )
         self._preflight_evidence = evidence
         if evidence is not None:

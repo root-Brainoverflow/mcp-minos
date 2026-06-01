@@ -1,0 +1,32 @@
+rules:
+  # ── HTTP request with no timeout ───────────────────────────────────────────
+  - id: mcp-r6-python-http-no-timeout
+    languages: [python]
+    severity: INFO
+    message: >
+      HTTP request without a timeout. A hung upstream can block the server
+      indefinitely, a stability/availability risk (R6).
+    metadata:
+      risk: R6
+      confidence: low
+    patterns:
+      - pattern-either:
+          - pattern: requests.get($URL)
+          - pattern: requests.post($URL, ...)
+          - pattern: requests.request(...)
+      - pattern-not: requests.get(..., timeout=$T)
+      - pattern-not: requests.post(..., timeout=$T)
+      - pattern-not: requests.request(..., timeout=$T)
+
+  # ── Whole-file read into memory ────────────────────────────────────────────
+  - id: mcp-r6-python-unbounded-read
+    languages: [python]
+    severity: INFO
+    message: >
+      Reads an entire file into memory with no size bound. A large/attacker-
+      controlled file can exhaust memory (R6).
+    metadata:
+      risk: R6
+      confidence: low
+    patterns:
+      - pattern: open(...).read()

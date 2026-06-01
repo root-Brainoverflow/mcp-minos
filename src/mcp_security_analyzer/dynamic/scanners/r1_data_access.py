@@ -17,7 +17,6 @@ import structlog
 
 from mcp_security_analyzer.dynamic.models import (
     AnalysisContext,
-    Event,
     Finding,
     RiskType,
     Severity,

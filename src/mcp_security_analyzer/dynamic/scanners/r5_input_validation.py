@@ -47,7 +47,6 @@ from mcp_security_analyzer.dynamic.models import ServerCrashError
 from mcp_security_analyzer.dynamic.protocol.client import McpClient, McpError
 from mcp_security_analyzer.dynamic.scanners._tool_classification import (
     is_retrieval_tool,
-    lookup_tool,
 )
 from mcp_security_analyzer.dynamic.scanners.base import BaseScanner, TestSequence
 

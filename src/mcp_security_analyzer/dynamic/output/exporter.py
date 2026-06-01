@@ -11,7 +11,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
-from mcp_security_analyzer.dynamic.models import AnalysisOutput, Finding
+from mcp_security_analyzer.dynamic.models import AnalysisOutput
 from mcp_security_analyzer.dynamic.output.scorer import ScoringResult
 
 _RISK_LABELS: dict[str, str] = {

@@ -1,0 +1,65 @@
+rules:
+  # ── SQL string built by f-string / concatenation then executed ─────────────
+  - id: mcp-r5-python-sql-fstring
+    languages: [python]
+    severity: ERROR
+    message: >
+      SQL executed from an f-string / concatenated string. If any interpolated
+      value is tool input this is SQL injection (R5).
+    metadata:
+      risk: R5
+      confidence: medium
+    patterns:
+      - pattern-either:
+          - pattern: $CUR.execute(f"...{$X}...", ...)
+          - pattern: $CUR.execute("..." + $X, ...)
+          - pattern: $CUR.executemany(f"...{$X}...", ...)
+
+  # ── Path built from interpolation then opened (path traversal) ─────────────
+  - id: mcp-r5-python-path-traversal
+    languages: [python]
+    severity: WARNING
+    message: >
+      File opened from an interpolated/concatenated path with no normalisation.
+      If the path derives from tool input this is path traversal (R5).
+    metadata:
+      risk: R5
+      confidence: low
+    patterns:
+      - pattern-either:
+          - pattern: open(f"...{$X}...", ...)
+          - pattern: open($DIR + $X, ...)
+          - pattern: pathlib.Path($BASE) / $X
+
+  - id: mcp-r5-node-path-traversal
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >
+      fs read/write from an interpolated path. If the path derives from tool
+      input this is path traversal (R5).
+    metadata:
+      risk: R5
+      confidence: low
+    patterns:
+      - pattern-either:
+          - pattern: fs.readFileSync(`...${$X}...`, ...)
+          - pattern: fs.writeFileSync(`...${$X}...`, ...)
+          - pattern: fs.readFile(`...${$X}...`, ...)
+          - pattern: fs.writeFile(`...${$X}...`, ...)
+
+  # ── Command built from a template string with interpolation ────────────────
+  - id: mcp-r5-node-shell-interpolation
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >
+      Shell command built from a template string with interpolation. If the
+      interpolated value is tool input this is command injection (R5/R2).
+    metadata:
+      risk: R5
+      confidence: medium
+    patterns:
+      - pattern-either:
+          - pattern: $CP.exec(`...${$X}...`, ...)
+          - pattern: $CP.execSync(`...${$X}...`, ...)
+          - pattern: execSync(`...${$X}...`, ...)
+          - pattern: exec(`...${$X}...`, ...)

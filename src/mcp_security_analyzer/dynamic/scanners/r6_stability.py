@@ -36,7 +36,6 @@ from mcp_security_analyzer.dynamic.payloads._response_filters import (
     strip_payload_echo,
 )
 from mcp_security_analyzer.dynamic.payloads.stability import (
-    SLOW_RESPONSE_THRESHOLD_SEC,
     generate_stability_payloads,
     looks_like_crash,
     looks_like_oom,

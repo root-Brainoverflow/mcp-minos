@@ -8,7 +8,6 @@ injecting prompt-like strings into ordinary tool arguments.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import structlog
@@ -20,8 +19,6 @@ from mcp_security_analyzer.dynamic.models import (
     Severity,
 )
 from mcp_security_analyzer.dynamic.payloads.injection_patterns import (
-    PatternMatch,
-    scan_description,
     scan_response,
 )
 from mcp_security_analyzer.dynamic.payloads.resource_poisoning import (
@@ -48,41 +45,16 @@ class R3LlmManipulationScanner(BaseScanner):
 
     async def analyze(self, ctx: AnalysisContext) -> list[Finding]:
         findings: list[Finding] = []
-        findings.extend(await self._scan_descriptions(ctx))
+        # Description-text pattern scanning moved to the shared
+        # ``static/scanners/descriptions.py``. It runs on the same runtime
+        # tools/list captured here, fed through the static findings runner —
+        # one canonical scanner, not two. Tool-poisoning heuristics (name
+        # collisions, hidden Unicode in identifiers, etc.) remain here
+        # because they operate on more than description text.
         findings.extend(await self._scan_tool_poisoning(ctx))
         findings.extend(await self._scan_responses(ctx))
         findings.extend(await self._scan_resource_reads(ctx))
         return findings
-
-    # -- injection_patterns static description scan --------------------------
-
-    async def _scan_descriptions(self, ctx: AnalysisContext) -> list[Finding]:
-        findings: list[Finding] = []
-        for tool in ctx.tools:
-            if not tool.description:
-                continue
-            for m in scan_description(tool.description):
-                findings.append(self._desc_finding(tool.name, tool.description, m))
-            if tool.annotations:
-                anno_text = json.dumps(tool.annotations)
-                for m in scan_description(anno_text):
-                    findings.append(self._desc_finding(tool.name, anno_text, m))
-        return findings
-
-    def _desc_finding(self, tool_name: str, text: str, m: PatternMatch) -> Finding:
-        sev = _sev(m.severity)
-        return Finding(
-            risk_type=RiskType.R3,
-            severity=sev,
-            confidence=0.85 if sev in (Severity.HIGH, Severity.CRITICAL) else 0.6,
-            title=f"Suspicious pattern '{m.pattern_name}' in tool description",
-            description=(
-                f"Tool '{tool_name}' description contains pattern '{m.pattern_name}' "
-                f"that may manipulate LLM behaviour.  Matched: \"{m.matched_text}\""
-            ),
-            tool_name=tool_name,
-            reproduction=f"Inspect description of tool '{tool_name}'",
-        )
 
     # -- tool_poisoning heuristics -------------------------------------------
 

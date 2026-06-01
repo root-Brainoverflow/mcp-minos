@@ -1,0 +1,87 @@
+rules:
+  # ── Direct command / process execution ─────────────────────────────────────
+  - id: mcp-r2-python-command-exec
+    languages: [python]
+    severity: WARNING
+    message: >
+      Direct OS command / process execution. If any argument derives from tool
+      input this is a command-execution risk (R2).
+    metadata:
+      risk: R2
+      confidence: low
+    patterns:
+      - pattern-either:
+          - pattern: os.system(...)
+          - pattern: os.popen(...)
+          - pattern: subprocess.Popen(...)
+          - pattern: subprocess.run(...)
+          - pattern: subprocess.call(...)
+          - pattern: subprocess.check_output(...)
+
+  - id: mcp-r2-node-command-exec
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >
+      Direct child_process execution. If any argument derives from tool input
+      this is a command-execution risk (R2).
+    metadata:
+      risk: R2
+      confidence: low
+    patterns:
+      - pattern-either:
+          - pattern: $CP.exec(...)
+          - pattern: $CP.execSync(...)
+          - pattern: $CP.spawn(...)
+          - pattern: $CP.spawnSync(...)
+          - pattern: exec(...)
+          - pattern: execSync(...)
+
+  # ── Dynamic code evaluation with a non-literal argument ────────────────────
+  - id: mcp-r2-python-dynamic-eval
+    languages: [python]
+    severity: ERROR
+    message: >
+      eval/exec of a non-literal expression. Dynamic code execution from a
+      computed value is a strong R2 signal.
+    metadata:
+      risk: R2
+      confidence: medium
+    patterns:
+      - pattern-either:
+          - pattern: eval($X)
+          - pattern: exec($X)
+      - metavariable-pattern:
+          metavariable: $X
+          patterns:
+            - pattern-not: "\"...\""
+
+  - id: mcp-r2-node-dynamic-eval
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >
+      eval / new Function of a computed value. Dynamic code execution is a
+      strong R2 signal.
+    metadata:
+      risk: R2
+      confidence: medium
+    patterns:
+      - pattern-either:
+          - pattern: eval($X)
+          - pattern: new Function(...)
+      - metavariable-pattern:
+          metavariable: $X
+          patterns:
+            - pattern-not: '"..."'
+
+  # ── Runtime package install ────────────────────────────────────────────────
+  - id: mcp-r2-runtime-package-install
+    languages: [python, javascript, typescript]
+    severity: WARNING
+    message: >
+      Runtime package installation (pip/npm install) invoked from server code.
+      Installing packages at run time is an R2 code-execution vector.
+    metadata:
+      risk: R2
+      confidence: medium
+    patterns:
+      - pattern-regex: '\b(pip\s+install|npm\s+install|npm\s+i\b|pnpm\s+add|yarn\s+add)\b'

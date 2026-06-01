@@ -12,7 +12,6 @@ their evidence chains and elevates the combined finding.
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import Any
 
 import structlog
 

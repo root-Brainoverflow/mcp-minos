@@ -1,0 +1,181 @@
+rules:
+  # ── Python: tool-handler input → shell exec ───────────────────────────────
+  - id: mcp-r5-python-command-injection-taint
+    languages: [python]
+    severity: ERROR
+    mode: taint
+    message: >
+      Tool input flows into a shell-executing call without quoting. The
+      interpolated argument is reachable from a tool-handler parameter and
+      arrives at a sink that runs commands (R2/R5).
+    metadata:
+      risk: R5
+      confidence: high
+    pattern-sources:
+      # The parameters of any function decorated with ``@<x>.tool`` / ``@tool``.
+      # ``mcp.tool``, ``server.tool``, ``app.tool`` all match.
+      - patterns:
+          - pattern-either:
+              - pattern: |
+                  @$DEC.tool(...)
+                  def $F(..., $P, ...): ...
+              - pattern: |
+                  @$DEC.tool
+                  def $F(..., $P, ...): ...
+              - pattern: |
+                  @tool(...)
+                  def $F(..., $P, ...): ...
+          - focus-metavariable: $P
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: os.system($X)
+              - pattern: os.popen($X)
+              - pattern: subprocess.run($X, ..., shell=True, ...)
+              - pattern: subprocess.Popen($X, ..., shell=True, ...)
+              - pattern: subprocess.call($X, ..., shell=True, ...)
+              - pattern: subprocess.check_output($X, ..., shell=True, ...)
+          - focus-metavariable: $X
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: shlex.quote(...)
+          - pattern: shlex.split(...)
+
+  # ── Python: tool-handler input → filesystem path ──────────────────────────
+  - id: mcp-r5-python-path-traversal-taint
+    languages: [python]
+    severity: WARNING
+    mode: taint
+    message: >
+      Tool input flows into a filesystem-opening call without normalisation
+      or containment, allowing path traversal (R5).
+    metadata:
+      risk: R5
+      confidence: high
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: |
+                  @$DEC.tool(...)
+                  def $F(..., $P, ...): ...
+              - pattern: |
+                  @$DEC.tool
+                  def $F(..., $P, ...): ...
+              - pattern: |
+                  @tool(...)
+                  def $F(..., $P, ...): ...
+          - focus-metavariable: $P
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: open($X, ...)
+              - pattern: pathlib.Path($X).read_text(...)
+              - pattern: pathlib.Path($X).read_bytes(...)
+              - pattern: pathlib.Path($X).write_text(...)
+          - focus-metavariable: $X
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: os.path.realpath(...)
+          - pattern: pathlib.Path(...).resolve()
+
+  # ── Python: tool-handler input → SQL execute ──────────────────────────────
+  - id: mcp-r5-python-sql-injection-taint
+    languages: [python]
+    severity: ERROR
+    mode: taint
+    message: >
+      Tool input flows into a SQL ``execute`` as part of the query string
+      itself, not as a parameter. This is classic SQL injection (R5).
+    metadata:
+      risk: R5
+      confidence: high
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: |
+                  @$DEC.tool(...)
+                  def $F(..., $P, ...): ...
+              - pattern: |
+                  @$DEC.tool
+                  def $F(..., $P, ...): ...
+              - pattern: |
+                  @tool(...)
+                  def $F(..., $P, ...): ...
+          - focus-metavariable: $P
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $CUR.execute(f"...{$X}...", ...)
+              - pattern: $CUR.execute("..." + $X, ...)
+              - pattern: $CUR.executemany(f"...{$X}...", ...)
+          - focus-metavariable: $X
+
+  # ── Node/TS: server-side handler input → shell exec ───────────────────────
+  - id: mcp-r5-node-command-injection-taint
+    languages: [javascript, typescript]
+    severity: ERROR
+    mode: taint
+    message: >
+      Handler input flows into a child_process call as part of the shell
+      command string, allowing command injection (R5/R2).
+    metadata:
+      risk: R5
+      confidence: high
+    pattern-sources:
+      # The arguments object of an MCP handler closure. Three common shapes
+      # cover the SDK's ``server.tool('name', schema, async (args) => ...)``
+      # form, the ``setRequestHandler('tools/call', async (req) => ...)`` form,
+      # and the bare ``async function handler(args)`` form.
+      - patterns:
+          - pattern-either:
+              - pattern: |
+                  $SRV.tool($N, $S, async ($ARGS) => { ... })
+              - pattern: |
+                  $SRV.tool($N, async ($ARGS) => { ... })
+              - pattern: |
+                  $SRV.setRequestHandler($T, async ($ARGS) => { ... })
+          - focus-metavariable: $ARGS
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $CP.exec($X, ...)
+              - pattern: $CP.execSync($X, ...)
+              - pattern: exec($X, ...)
+              - pattern: execSync($X, ...)
+          - focus-metavariable: $X
+
+  # ── Node/TS: handler input → filesystem path ──────────────────────────────
+  - id: mcp-r5-node-path-traversal-taint
+    languages: [javascript, typescript]
+    severity: WARNING
+    mode: taint
+    message: >
+      Handler input flows into an ``fs.*`` path argument without
+      normalisation, allowing path traversal (R5).
+    metadata:
+      risk: R5
+      confidence: high
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: |
+                  $SRV.tool($N, $S, async ($ARGS) => { ... })
+              - pattern: |
+                  $SRV.tool($N, async ($ARGS) => { ... })
+              - pattern: |
+                  $SRV.setRequestHandler($T, async ($ARGS) => { ... })
+          - focus-metavariable: $ARGS
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: fs.readFileSync($P, ...)
+              - pattern: fs.writeFileSync($P, ...)
+              - pattern: fs.readFile($P, ...)
+              - pattern: fs.writeFile($P, ...)
+              - pattern: fs.promises.readFile($P, ...)
+              - pattern: fs.promises.writeFile($P, ...)
+          - focus-metavariable: $P
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: path.normalize(...)
+          - pattern: path.resolve(...)

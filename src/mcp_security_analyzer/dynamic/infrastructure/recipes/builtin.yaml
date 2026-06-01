@@ -218,22 +218,14 @@ recipes:
       - "RUN pip install --no-cache-dir postgres-mcp"
       - "USER user"
 
-  - id: postgres-mcp-node-install
-    description: "Pre-install @modelcontextprotocol/server-postgres npm package"
-    match:
-      runtime_prefix: "mcp-sandbox-node"
-      any_of:
-        - identity_tokens_any:
-            - "@modelcontextprotocol/server-postgres"
-            - "mcp-server-postgres"
-        - package_name_any:
-            - "server-postgres"
-    # Sidecar runs on an ``--internal`` network so npx cannot fetch the
-    # package at run time; install it globally during image build instead.
-    dockerfile_lines:
-      - "USER root"
-      - "RUN npm install -g @modelcontextprotocol/server-postgres"
-      - "USER user"
+  # NOTE: A per-server ``postgres-mcp-node-install`` recipe used to live here.
+  # It's been removed because ``bootstrap._remote_install_action`` now handles
+  # any sidecar-bound npx server generically — including
+  # ``npx @modelcontextprotocol/server-postgres`` — via a prebuilt
+  # node_modules + cwd-shim pattern that actually defeats npm 10's manifest
+  # probe to registry.npmjs.org (the recipe's bare ``npm install -g`` did not).
+  # Keep that single source of truth in Python; do not re-add a YAML
+  # equivalent without porting the shim pattern too.
 
   - id: postgres-mcp-sidecar
     description: "Ephemeral PostgreSQL backend for postgres-mcp"

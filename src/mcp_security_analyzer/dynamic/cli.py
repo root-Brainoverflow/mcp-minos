@@ -11,7 +11,7 @@ import structlog
 from rich.console import Console
 from rich.table import Table
 
-from mcp_security_analyzer.dynamic.config import AnalysisConfig, load_config
+from mcp_security_analyzer.dynamic.config import AnalysisConfig, ServerConfig, load_config
 from mcp_security_analyzer.dynamic.discovery import (
     DiscoveredServer,
     discover_servers,
@@ -26,12 +26,16 @@ console = Console(stderr=True)
 @click.group()
 def main() -> None:
     """MCP Dynamic Analyzer — dynamic security analysis for MCP servers."""
+    # Route logs to stderr so stdout carries only command output (e.g. the
+    # JSON report). The default structlog logger factory writes to stdout,
+    # which would corrupt `--format json`.
     structlog.configure(
         processors=[
             structlog.stdlib.add_log_level,
             structlog.dev.ConsoleRenderer(),
         ],
         wrapper_class=structlog.stdlib.BoundLogger,
+        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
     )
 
 
@@ -79,7 +83,14 @@ def scan(
     fmt: str,
     no_docker: bool,
 ) -> None:
-    """Run a full dynamic analysis on a discovered MCP server."""
+    """Run the combined static + dynamic analysis on a discovered MCP server.
+
+    Equivalent to running ``static`` and ``dynamic`` together: the static
+    source-tree scanners (manifest security, Semgrep) run before the sandbox,
+    and the description / schema scanners run after with the runtime
+    ``tools/list`` as additional input. Use ``static`` or ``dynamic`` to run
+    each phase on its own.
+    """
     if config_path:
         cfg = load_config(config_path)
     elif quick:
@@ -110,11 +121,266 @@ def scan(
         f"[dim]({picked.source} — {picked.source_path})[/dim]"
     )
 
+    # Static phase: collect environment information (local source scan or
+    # tarball fetch + scan) so the dynamic side can configure the sandbox
+    # correctly on the first attempt instead of relying on the stderr-retry
+    # path. Always safe to call — an empty snapshot is returned when nothing
+    # can be inspected.
+    from mcp_security_analyzer.static.findings_runner import run_static_findings
+    from mcp_security_analyzer.static.runner import collect_environment_snapshot
+
+    snapshot, snapshot_cleanup = collect_environment_snapshot(cfg.server)
+    console.print(
+        f"[green]Static:[/green] origin={snapshot.origin.value} "
+        f"coverage={snapshot.coverage.value} "
+        f"signals={sorted(snapshot.source_signals) or '[]'}"
+    )
+
     from mcp_security_analyzer.dynamic.orchestrator import run_analysis, build_default_scanners
 
-    output = asyncio.run(
-        run_analysis(cfg, use_docker=not no_docker, scanners=build_default_scanners(cfg)),
+    try:
+        output = asyncio.run(
+            run_analysis(
+                cfg,
+                use_docker=not no_docker,
+                scanners=build_default_scanners(cfg),
+                environment_snapshot=snapshot,
+            ),
+        )
+        # Now that the dynamic phase has captured the runtime tools/list,
+        # feed those tool definitions into the static description / schema
+        # scanners. Source-tree scanners (manifest, semgrep) also run here,
+        # while the extracted tarball is still on disk (cleanup is below).
+        static_report = run_static_findings(snapshot, runtime_tools=output.tools)
+        _print_static_report(static_report)
+    finally:
+        # Remove any temp directory the static phase extracted a tarball into.
+        snapshot_cleanup()
+
+    if fmt == "json":
+        import json
+
+        combined = {
+            "static": static_report.to_dict(),
+            "dynamic": json.loads(output.model_dump_json()),
+        }
+        click.echo(json.dumps(combined, indent=2, ensure_ascii=False))
+    else:
+        _print_summary(output)
+
+
+def _print_static_report(report: "object") -> None:
+    """Render the static-analysis findings as a rich table."""
+    from mcp_security_analyzer.static.findings_runner import StaticReport
+
+    assert isinstance(report, StaticReport)
+    console.print(
+        f"[green]Static scan:[/green] {len(report.findings)} finding(s), "
+        f"{report.tools_analyzed} tool(s) analyzed ({report.tool_source}); "
+        f"scanners: {', '.join(report.scanners_run) or 'none'}"
     )
+    if not report.findings:
+        return
+
+    table = Table(title="Static Findings", show_lines=False)
+    table.add_column("risk", style="bold")
+    table.add_column("severity")
+    table.add_column("conf", justify="right")
+    table.add_column("scanner")
+    table.add_column("location", overflow="fold")
+    table.add_column("title", overflow="fold")
+    _sev_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
+    for f in sorted(
+        report.findings,
+        key=lambda x: (_sev_order.get(x.severity.value, 9), x.risk_type.value),
+    ):
+        table.add_row(
+            f.risk_type.value,
+            f.severity.value,
+            f"{f.confidence:.2f}",
+            f.scanner,
+            f.location or "",
+            f.title,
+        )
+    console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# static (static-only, no Docker)
+# ---------------------------------------------------------------------------
+
+@main.command()
+@click.option("--target", default=None, help="Name of a discovered MCP server (see `discover`)")
+@click.option("--command", default=None, help="Server launch command (e.g. npx, uvx, python3)")
+@click.option("--arg", "args", multiple=True, help="Server argument (repeatable)")
+@click.option("--format", "fmt", type=click.Choice(["json", "summary"]), default="summary")
+def static(
+    target: str | None,
+    command: str | None,
+    args: tuple[str, ...],
+    fmt: str,
+) -> None:
+    """Run only the source-tree static scanners (no Docker, no server execution).
+
+    Collects the environment snapshot (local source or fetched tarball) and
+    runs the scanners that need only the source tree — manifest security and
+    Semgrep. Description and schema scanners are skipped here because their
+    authoritative input is the runtime tools/list, which only the dynamic
+    phase (``scan``) can capture.
+
+    Select the target the same way as `scan`, by discovered name:
+
+        minos static --target browsermcp
+
+    or pass an ad-hoc launch command for a package not in any config:
+
+        minos static --command npx --arg @browsermcp/mcp@latest
+    """
+    from mcp_security_analyzer.static.findings_runner import run_static_findings
+    from mcp_security_analyzer.static.runner import collect_environment_snapshot
+
+    if target:
+        servers = discover_servers()
+        if not servers:
+            click.echo(
+                "Error: no MCP servers found. Run `minos discover` to see "
+                "what's available, or pass --command/--arg directly.",
+                err=True,
+            )
+            sys.exit(1)
+        try:
+            picked = select_server(servers, target, None)
+        except ValueError as exc:
+            click.echo(f"Error: {exc}", err=True)
+            sys.exit(1)
+        server = picked.server
+        console.print(
+            f"[green]Target:[/green] {picked.name}  "
+            f"[dim]({picked.source} — {picked.source_path})[/dim]"
+        )
+    elif command:
+        server = ServerConfig(command=command, args=list(args))
+    else:
+        click.echo(
+            "Error: provide either --target <name> or --command <cmd>.",
+            err=True,
+        )
+        sys.exit(1)
+
+    snapshot, snapshot_cleanup = collect_environment_snapshot(server)
+    console.print(
+        f"[green]Static:[/green] origin={snapshot.origin.value} "
+        f"coverage={snapshot.coverage.value} "
+        f"package={snapshot.package_name or '-'}@{snapshot.package_version or '-'} "
+        f"signals={sorted(snapshot.source_signals) or '[]'}"
+    )
+    try:
+        report = run_static_findings(snapshot)
+    finally:
+        snapshot_cleanup()
+
+    if fmt == "json":
+        import json
+
+        click.echo(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
+    else:
+        _print_static_report(report)
+
+
+# ---------------------------------------------------------------------------
+# dynamic (dynamic-only, runs the sandbox without static findings)
+# ---------------------------------------------------------------------------
+
+@main.command()
+@click.option("--target", default=None, help="Name of a discovered MCP server (see `discover`)")
+@click.option("--command", default=None, help="Server launch command (e.g. npx, uvx, python3)")
+@click.option("--arg", "args", multiple=True, help="Server argument (repeatable)")
+@click.option("--config", "config_path", type=click.Path(exists=True), default=None)
+@click.option("--quick", is_flag=True, help="Quick scan (R1 + R3 + R5 only)")
+@click.option("--format", "fmt", type=click.Choice(["json", "summary"]), default="summary")
+@click.option("--no-docker", is_flag=True, help="Run server locally without Docker")
+def dynamic(
+    target: str | None,
+    command: str | None,
+    args: tuple[str, ...],
+    config_path: str | None,
+    quick: bool,
+    fmt: str,
+    no_docker: bool,
+) -> None:
+    """Run only the dynamic (sandboxed runtime) analysis — no static scanners.
+
+    Boots the server in a sandbox, drives it with the payload sequencers, and
+    runs the dynamic scanners (R1–R6). The environment snapshot is still
+    collected so the sandbox can match the server's runtime requirements on
+    the first attempt, but no static findings are produced.
+
+    Use ``scan`` for the combined static + dynamic flow.
+
+    Select the target the same way as `static`/`scan`:
+
+        minos dynamic --target browsermcp
+        minos dynamic --command npx --arg @browsermcp/mcp@latest
+    """
+    if config_path:
+        cfg = load_config(config_path)
+    elif quick:
+        cfg = load_config(Path(__file__).parents[3] / "configs" / "quick.yaml")
+    else:
+        cfg = AnalysisConfig()
+
+    if target:
+        servers = discover_servers()
+        if not servers:
+            click.echo(
+                "Error: no MCP servers found. Run `minos discover` to see "
+                "what's available, or pass --command/--arg directly.",
+                err=True,
+            )
+            sys.exit(1)
+        try:
+            picked = select_server(servers, target, None)
+        except ValueError as exc:
+            click.echo(f"Error: {exc}", err=True)
+            sys.exit(1)
+        cfg.server = picked.server
+        console.print(
+            f"[green]Target:[/green] {picked.name}  "
+            f"[dim]({picked.source} — {picked.source_path})[/dim]"
+        )
+    elif command:
+        cfg.server = ServerConfig(command=command, args=list(args))
+    else:
+        click.echo(
+            "Error: provide either --target <name> or --command <cmd>.",
+            err=True,
+        )
+        sys.exit(1)
+
+    # Environment snapshot is collected so the sandbox configures correctly
+    # on the first attempt — but the static security scanners are NOT run.
+    from mcp_security_analyzer.static.runner import collect_environment_snapshot
+
+    snapshot, snapshot_cleanup = collect_environment_snapshot(cfg.server)
+    console.print(
+        f"[green]Env:[/green] origin={snapshot.origin.value} "
+        f"coverage={snapshot.coverage.value} "
+        f"signals={sorted(snapshot.source_signals) or '[]'}"
+    )
+
+    from mcp_security_analyzer.dynamic.orchestrator import build_default_scanners, run_analysis
+
+    try:
+        output = asyncio.run(
+            run_analysis(
+                cfg,
+                use_docker=not no_docker,
+                scanners=build_default_scanners(cfg),
+                environment_snapshot=snapshot,
+            ),
+        )
+    finally:
+        snapshot_cleanup()
 
     if fmt == "json":
         click.echo(output.model_dump_json(indent=2))
@@ -138,7 +404,7 @@ def _print_discovered(servers: list[DiscoveredServer]) -> None:
         table.add_row(str(i), s.name, s.source, preview)
     console.print(table)
     console.print(
-        "\n[dim]Run:[/dim] minos scan --target <name>"
+        "\n[dim]Run:[/dim] minos scan|static|dynamic --target <name>"
     )
 
 
@@ -285,3 +551,7 @@ def _print_summary(output: AnalysisOutput) -> None:
         f"Findings: {len(output.findings)}",
     )
     console.print(f"  Results: {output.event_log_path}\n")
+
+
+if __name__ == "__main__":
+    main()

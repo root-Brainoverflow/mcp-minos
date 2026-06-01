@@ -19,7 +19,6 @@ import asyncio
 import platform
 import re
 import shutil
-import sys
 from typing import Any
 
 import structlog

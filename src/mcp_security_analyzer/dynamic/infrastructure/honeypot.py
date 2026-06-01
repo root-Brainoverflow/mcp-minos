@@ -15,7 +15,6 @@ import asyncio
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
 from uuid import uuid4
 
 import structlog
