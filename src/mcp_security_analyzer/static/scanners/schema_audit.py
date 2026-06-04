@@ -41,6 +41,7 @@ def scan_schemas(tools: list[ToolInfo]) -> list[StaticFinding]:
                 # Capped low — this is attack-surface context, not a confirmed
                 # vulnerability. The dynamic phase corroborates.
                 confidence=min(0.45, round(score / 2, 3)),
+                kind="static.schema_permissive",
                 title="Permissive input schema",
                 description=(
                     f"Tool '{tool.name}' accepts loosely-constrained input "

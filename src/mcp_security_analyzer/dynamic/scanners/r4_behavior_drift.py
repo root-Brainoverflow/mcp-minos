@@ -67,6 +67,7 @@ class R4BehaviorDriftScanner(BaseScanner):
                     risk_type=RiskType.R4,
                     severity=Severity.HIGH,
                     confidence=0.85,
+                    kind="r4.rug_pull",
                     title="Rug Pull: tools/list changed between calls",
                     description=(
                         f"tools/list returned different tool sets across calls. "
@@ -109,6 +110,7 @@ class R4BehaviorDriftScanner(BaseScanner):
                     risk_type=RiskType.R4,
                     severity=Severity.HIGH,
                     confidence=0.8,
+                    kind="r4.env_tool_divergence",
                     title=f"Env-conditional tool set (variation '{tag}')",
                     description=(
                         f"Server exposes different tools under env variation '{tag}'. "
@@ -140,6 +142,7 @@ class R4BehaviorDriftScanner(BaseScanner):
                     risk_type=RiskType.R4,
                     severity=Severity.MEDIUM,
                     confidence=0.7,
+                    kind="r4.capability_mismatch",
                     title="Capability mismatch: file writes without write capability",
                     description=f"Server performed {write_count} file_write syscalls but does not declare write capability.",
                     reproduction="Compare declared capabilities with observed syscalls",
@@ -153,6 +156,7 @@ class R4BehaviorDriftScanner(BaseScanner):
                 risk_type=RiskType.R4,
                 severity=Severity.MEDIUM,
                 confidence=0.7,
+                kind="r4.capability_mismatch",
                 title="Capability mismatch: network activity without network capability",
                 description=f"Server made {net_count} network connections but does not declare network capability.",
                 reproduction="Compare declared capabilities with observed network events",

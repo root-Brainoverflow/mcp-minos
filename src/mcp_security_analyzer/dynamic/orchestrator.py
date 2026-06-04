@@ -107,6 +107,7 @@ async def run_analysis(
     output_dir = Path(config.output.output_dir) / session_id
     event_store = EventStore(output_dir)
     tools: list[ToolInfo] = []
+    scan_completed = False
     started_at = time.monotonic()
 
     log.info("orchestrator.collection.start", session_id=session_id)
@@ -123,7 +124,7 @@ async def run_analysis(
     trusted_internal_ips: set[str] = set()
 
     try:
-        tools = await _collect(
+        tools, scan_completed = await _collect(
             config=config,
             session_id=session_id,
             event_store=event_store,
@@ -239,6 +240,30 @@ async def run_analysis(
     scoring_result = Scorer().score(correlated)
     event_count = await reader.count()
 
+    # New severity/verdict model (docs/severity-verdict-model.md): a binary
+    # REJECT/PASS over the finding pool, or ERROR(검사 불가) when the scan
+    # achieved no meaningful coverage. Carried in metadata alongside the legacy
+    # per-risk scores during the transition.
+    from mcp_security_analyzer.dynamic.output import verdict as verdict_mod
+
+    # Coverage is valid only when tools were discovered AND the sequence run
+    # finished without being cut short (unrecovered crash / timeout / EOF). A
+    # *recovered* crash keeps scan_completed True → the crash is an AVAILABILITY
+    # warning, not ERROR. (docs/severity-verdict-model.md §8.4)
+    coverage_ok = len(tools) > 0 and scan_completed
+    verdict_result = verdict_mod.evaluate(
+        correlated,
+        coverage_ok=coverage_ok,
+        error_message=(
+            None if coverage_ok
+            else (
+                "No tools were exercised — the server may have failed to start or exposes no tools."
+                if not tools
+                else "The scan was cut short (server crashed/timed out before completing) — coverage is partial."
+            )
+        ),
+    )
+
     # Prefer the server's self-declared identity from its `initialize` reply
     # (e.g. ``drawio-mcp``, ``chrome_devtools``, ``n8n-documentation-mcp``)
     # over the raw launch command (``npx``, ``docker``, ``uvx``) — the latter
@@ -262,6 +287,7 @@ async def run_analysis(
             "duration_sec": time.monotonic() - started_at,
             "tools_tested": len(tools),
             "total_events": event_count,
+            "verdict": verdict_result.to_dict(),
         },
         tools=tools,
     )
@@ -289,8 +315,16 @@ async def _collect(
     variation_tag: str | None = None,
     trusted_internal_ips: set[str] | None = None,
     environment_snapshot: EnvironmentSnapshot | None = None,
-) -> list[ToolInfo]:
-    """Run collection sequences inside a sandbox, return discovered tools.
+) -> tuple[list[ToolInfo], bool]:
+    """Run collection sequences inside a sandbox.
+
+    Returns ``(tools, scan_completed)``. ``scan_completed`` is True only when
+    every sequence ran to the end; it is False when the run was cut short by an
+    unrecovered crash (``_MAX_CRASH_RESTARTS`` exceeded), a global timeout, or a
+    server stdout EOF — i.e. coverage is partial, so the verdict layer (§8.4)
+    reports ERROR(검사 불가) rather than a clean PASS. A *recovered* crash
+    (server restarted and the remaining sequences finished) leaves it True, so
+    that crash is an AVAILABILITY warning, not an ERROR.
 
     If the server crashes mid-sequence, the sandbox is restarted and the
     remaining sequences continue on the fresh container (up to
@@ -309,6 +343,7 @@ async def _collect(
 
         remaining = list(sequences)
         crash_count = 0
+        completed = False  # True only when the sequence loop finishes normally
         # Payload categories that have crashed the server in a prior
         # iteration. Re-applied to every fuzzing sequence before each
         # (re)run so a restarted sequence skips the whole category instead
@@ -386,6 +421,7 @@ async def _collect(
                                 error=str(exc),
                             )
                     remaining = []  # all sequences done
+                    completed = True
 
                 except ServerCrashError as exc:
                     crash_count += 1
@@ -498,7 +534,7 @@ async def _collect(
         if honeypot is not None:
             honeypot.cleanup()
 
-    return tools
+    return tools, completed
 
 
 async def _detect_missing_prerequisite(

@@ -68,6 +68,7 @@ class R2CodeExecScanner(BaseScanner):
                     risk_type=RiskType.R2,
                     severity=Severity.HIGH,
                     confidence=0.85,
+                    kind="r2.shell_exec",
                     title=f"Shell execution detected: {exe}",
                     description=f"Server spawned shell '{exe}'. argv: {evt.data.get('argv', [])}",
                     related_events=[evt.event_id],
@@ -79,6 +80,7 @@ class R2CodeExecScanner(BaseScanner):
                     risk_type=RiskType.R2,
                     severity=Severity.CRITICAL,
                     confidence=0.9,
+                    kind="r2.installer_exec",
                     title=f"Package installer execution: {exe}",
                     description=f"Server ran installer '{exe}', potentially downloading malicious code.",
                     related_events=[evt.event_id],
@@ -92,6 +94,7 @@ class R2CodeExecScanner(BaseScanner):
                         risk_type=RiskType.R2,
                         severity=Severity.CRITICAL,
                         confidence=0.9,
+                        kind="r2.cmd_injection_exec",
                         title=f"Command injection → exec: {exe}",
                         description=(
                             f"execve('{exe}') occurred within 5 s of a fuzzing payload, "
@@ -162,6 +165,7 @@ class R2CodeExecScanner(BaseScanner):
                     risk_type=RiskType.R2,
                     severity=Severity.CRITICAL,
                     confidence=0.85,
+                    kind="r2.rce_indicator",
                     title=f"RCE indicator in response for tool '{tool_name}' (category '{cat}')",
                     description=(
                         f"Tool '{tool_name}' returned content matching RCE success indicators "

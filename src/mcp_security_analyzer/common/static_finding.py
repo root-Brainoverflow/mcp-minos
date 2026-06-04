@@ -36,6 +36,10 @@ class StaticFinding:
     # Tool name when the finding concerns a specific MCP tool.
     tool_name: str | None = None
     tags: tuple[str, ...] = field(default_factory=tuple)
+    # Catalog key for the severity/verdict model (output.policy). The verdict
+    # engine looks up (Impact, Evidence) from this kind; unknown/None fails
+    # closed. NOTE: distinct from ``evidence`` above (a matched-snippet string).
+    kind: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -49,4 +53,5 @@ class StaticFinding:
             "evidence": self.evidence,
             "tool_name": self.tool_name,
             "tags": list(self.tags),
+            "kind": self.kind,
         }

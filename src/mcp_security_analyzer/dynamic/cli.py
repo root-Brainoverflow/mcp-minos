@@ -157,16 +157,27 @@ def scan(
         # Remove any temp directory the static phase extracted a tarball into.
         snapshot_cleanup()
 
+    # Unified severity/verdict over the static + dynamic finding pool
+    # (docs/severity-verdict-model.md §5 union).
+    from mcp_security_analyzer.dynamic.output import verdict as verdict_mod
+
+    unified_verdict = verdict_mod.evaluate(
+        list(output.findings) + list(static_report.findings),
+        coverage_ok=output.metadata.get("tools_tested", 0) > 0,
+    )
+
     if fmt == "json":
         import json
 
         combined = {
             "static": static_report.to_dict(),
             "dynamic": json.loads(output.model_dump_json()),
+            "verdict": unified_verdict.to_dict(),
         }
         click.echo(json.dumps(combined, indent=2, ensure_ascii=False))
     else:
         _print_summary(output)
+        _print_verdict(unified_verdict.to_dict(), title="Unified verdict (static + dynamic)")
 
 
 def _print_static_report(report: "object") -> None:
@@ -551,6 +562,28 @@ def _print_summary(output: AnalysisOutput) -> None:
         f"Findings: {len(output.findings)}",
     )
     console.print(f"  Results: {output.event_log_path}\n")
+
+    _print_verdict(meta.get("verdict"), title="Verdict (dynamic)")
+
+
+def _print_verdict(v: dict | None, *, title: str = "Verdict") -> None:
+    """Render the severity/verdict-model decision (docs/severity-verdict-model.md)."""
+    if not v:
+        return
+    from rich.panel import Panel
+
+    decision = v.get("decision", "?")
+    style = {"REJECT": "red", "PASS": "green", "ERROR": "yellow"}.get(decision, "white")
+    body = [f"[bold {style}]{decision}[/bold {style}]"]
+    if decision == "ERROR":
+        body.append(f"검사 불가 (untestable): {v.get('error_message') or v.get('error_code') or ''}")
+    reasons = v.get("reasons") or []
+    if reasons:
+        body.append("사유: " + ", ".join(sorted({r.get("reason") for r in reasons if r.get("reason")})))
+    warnings = v.get("warnings") or {}
+    if warnings:
+        body.append("경고: " + ", ".join(f"{k} ({n})" for k, n in warnings.items()))
+    console.print(Panel("\n".join(body), title=f"[bold]{title}[/bold]", border_style=style))
 
 
 if __name__ == "__main__":

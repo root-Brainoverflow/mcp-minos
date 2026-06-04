@@ -96,6 +96,7 @@ class ChainAttackScanner(BaseScanner):
                     risk_type=RiskType.R3,
                     severity=Severity.HIGH,
                     confidence=0.85,
+                    kind="chain.readonly_mismatch",
                     title=f"Read-only annotation mismatch on '{tool.name}'",
                     description=(
                         f"Tool '{tool.name}' advertises readOnlyHint=true, but its "
@@ -139,6 +140,7 @@ class ChainAttackScanner(BaseScanner):
                         risk_type=RiskType.R3,
                         severity=Severity.MEDIUM,
                         confidence=0.75,
+                        kind="chain.guided_chain",
                         title=f"Server-guided tool chain: {tool.name} → {dest.name}",
                         description=(
                             f"Tool '{tool.name}' metadata references destructive tool "

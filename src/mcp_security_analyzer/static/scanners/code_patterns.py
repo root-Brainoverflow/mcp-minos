@@ -118,6 +118,35 @@ def scan_code_patterns(
     return findings
 
 
+# Semgrep rule id (bare, last dotted segment) → severity/verdict catalog kind
+# (output.policy). Rules with no good catalog match are omitted → kind=None →
+# fail-closed to (LIMITED, POTENTIAL): a warn, never a block.
+_RULE_KIND: dict[str, str] = {
+    "mcp-r1-env-secret-access": "static.secret_read",
+    "mcp-r1-env-secret-access-node": "static.secret_read",
+    # mcp-r1-broad-file-read → fail-closed (no broad-fs-read kind)
+    "mcp-r2-python-dynamic-eval": "static.eval",
+    "mcp-r2-node-dynamic-eval": "static.eval",
+    "mcp-r2-python-command-exec": "static.command_exec",
+    "mcp-r2-node-command-exec": "static.command_exec",
+    "mcp-r2-runtime-package-install": "static.runtime_install",
+    "mcp-r4-sandbox-detection-python": "static.env_time_branch",
+    "mcp-r4-sandbox-detection-node": "static.env_time_branch",
+    "mcp-r4-time-conditional-python": "static.env_time_branch",
+    "mcp-r4-time-conditional-node": "static.env_time_branch",
+    "mcp-r5-python-command-injection-taint": "static.taint_flow",
+    "mcp-r5-node-command-injection-taint": "static.taint_flow",
+    "mcp-r5-python-path-traversal": "static.taint_flow",
+    "mcp-r5-python-path-traversal-taint": "static.taint_flow",
+    "mcp-r5-node-path-traversal": "static.taint_flow",
+    "mcp-r5-node-path-traversal-taint": "static.taint_flow",
+    "mcp-r5-node-shell-interpolation": "static.taint_flow",
+    "mcp-r5-python-sql-fstring": "static.taint_flow",
+    "mcp-r5-python-sql-injection-taint": "static.taint_flow",
+    # mcp-r6-* (http-no-timeout, unbounded-read) → fail-closed (no R6 static kind)
+}
+
+
 def _result_to_finding(res: dict, root: Path) -> StaticFinding | None:
     extra = res.get("extra") or {}
     meta = extra.get("metadata") or {}
@@ -126,6 +155,9 @@ def _result_to_finding(res: dict, root: Path) -> StaticFinding | None:
     if risk is None:
         # A rule without a recognised risk tag — skip rather than misclassify.
         return None
+
+    # Map the specific rule id → catalog kind (None ⇒ fail-closed in policy).
+    kind = _RULE_KIND.get(str(res.get("check_id", "")).split(".")[-1])
 
     severity = _SEMGREP_SEVERITY.get(extra.get("severity", "WARNING"), Severity.MEDIUM)
     confidence = _CONFIDENCE.get(str(meta.get("confidence", "low")).lower(), 0.3)
@@ -151,4 +183,5 @@ def _result_to_finding(res: dict, root: Path) -> StaticFinding | None:
         location=location,
         evidence=snippet[:200] if snippet else None,
         tags=("semgrep", res.get("check_id", "")),
+        kind=kind,
     )

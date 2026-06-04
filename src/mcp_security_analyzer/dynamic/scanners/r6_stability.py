@@ -289,7 +289,7 @@ class R6StabilityScanner(BaseScanner):
                 risk_type=RiskType.R6,
                 severity=Severity.LOW,
                 confidence=0.7,
-                title=f"Scan coverage incomplete — server needs '{name}' (not installed)",
+                kind="r6.coverage_incomplete", title=f"Scan coverage incomplete — server needs '{name}' (not installed)",
                 description=(
                     f"This server's tools depend on '{name}', which wasn't available in the "
                     f"sandbox (the analyzer tried to auto-install it and couldn't). So those "
@@ -369,6 +369,7 @@ class R6StabilityScanner(BaseScanner):
                 confidence=0.9,
                 title=title,
                 description=description,
+                kind="r6.server_crash",
                 related_events=event_ids,
                 tool_name=tool_name,
                 reproduction=reproduction,
@@ -402,7 +403,7 @@ class R6StabilityScanner(BaseScanner):
                 risk_type=RiskType.R6,
                 severity=Severity.LOW,
                 confidence=0.5,
-                title=f"Sequence timeout: '{seq}'",
+                kind="r6.sequence_timeout", title=f"Sequence timeout: '{seq}'",
                 description=(
                     f"Test sequence '{seq}' did not complete within its timeout. "
                     f"This can indicate a server hang, slow outbound calls "
@@ -451,7 +452,7 @@ class R6StabilityScanner(BaseScanner):
                         risk_type=RiskType.R6,
                         severity=Severity.MEDIUM,
                         confidence=0.7,
-                        title=f"Timeout / hang on category '{cat}' for tool '{tool}'",
+                        kind="r6.sequence_timeout", title=f"Timeout / hang on category '{cat}' for tool '{tool}'",
                         description=f"Payload in category '{cat}' caused the server to time out.",
                         related_events=rel,
                         tool_name=tool,
@@ -464,7 +465,7 @@ class R6StabilityScanner(BaseScanner):
                         risk_type=RiskType.R6,
                         severity=Severity.MEDIUM,
                         confidence=0.7,
-                        title=f"Tool '{tool}' stalled after '{cat}' input (cascading timeouts on {len(group) - 1} subsequent requests)",
+                        kind="r6.sequence_timeout", title=f"Tool '{tool}' stalled after '{cat}' input (cascading timeouts on {len(group) - 1} subsequent requests)",
                         description=(
                             f"A payload in category '{cat}' put '{tool}' into an unresponsive state; "
                             f"the following {len(group) - 1} subsequent fuzz inputs "
@@ -545,6 +546,7 @@ class R6StabilityScanner(BaseScanner):
                 risk_type=RiskType.R6,
                 severity=Severity.MEDIUM,
                 confidence=0.8,
+                kind="r6.error_info_leak",
                 title=(
                     f"Server returns -32603 'Internal error' for "
                     f"{n_32603}/{total_errors} malformed inputs "
@@ -578,7 +580,7 @@ class R6StabilityScanner(BaseScanner):
             risk_type=RiskType.R6,
             severity=Severity.MEDIUM,
             confidence=0.6,
-            title=f"High error rate: {total_errors}/{total_calls} ({rate:.0%})",
+            kind="r6.high_error_rate", title=f"High error rate: {total_errors}/{total_calls} ({rate:.0%})",
             description=(
                 f"{total_errors} out of {total_calls} server responses were errors. "
                 f"This suggests poor input validation or unstable implementation."
@@ -652,6 +654,7 @@ class R6StabilityScanner(BaseScanner):
                     risk_type=RiskType.R6,
                     severity=Severity.LOW if handled else Severity.HIGH,
                     confidence=0.7 if handled else 0.85,
+                    kind="r6.oom_handled" if handled else "r6.oom",
                     title=(
                         f"Handled out-of-memory error on category '{cat}' for tool '{tool}'"
                         if handled else
@@ -673,6 +676,7 @@ class R6StabilityScanner(BaseScanner):
                     risk_type=RiskType.R6,
                     severity=Severity.LOW if handled else Severity.HIGH,
                     confidence=0.7 if handled else 0.85,
+                    kind="r6.crash_handled" if handled else "r6.stack_overflow",
                     title=(
                         f"Handled recursion-depth error on category '{cat}' for tool '{tool}'"
                         if handled else
@@ -694,7 +698,7 @@ class R6StabilityScanner(BaseScanner):
                     risk_type=RiskType.R6,
                     severity=Severity.MEDIUM,
                     confidence=0.75,
-                    title=f"Parser failure on category '{cat}' for tool '{tool}'",
+                    kind="r6.parser_failure", title=f"Parser failure on category '{cat}' for tool '{tool}'",
                     description=f"Bomb payload in category '{cat}' caused a parser error (entity expansion / nesting limit).",
                     related_events=[evt.event_id],
                     tool_name=tool,
@@ -704,6 +708,7 @@ class R6StabilityScanner(BaseScanner):
                 findings.append(Finding(
                     risk_type=RiskType.R6,
                     severity=Severity.LOW if handled else Severity.CRITICAL,
+                    kind="r6.crash_handled" if handled else "r6.server_crash",
                     confidence=0.7 if handled else 0.9,
                     title=(
                         f"Handled crash-like error on category '{cat}' for tool '{tool}'"
@@ -733,7 +738,7 @@ class R6StabilityScanner(BaseScanner):
                     risk_type=RiskType.R6,
                     severity=Severity.MEDIUM,
                     confidence=0.7,
-                    title=f"Timeout / hang on category '{cat}' for tool '{tool}'",
+                    kind="r6.sequence_timeout", title=f"Timeout / hang on category '{cat}' for tool '{tool}'",
                     description=f"Payload in category '{cat}' caused the server to time out.",
                     related_events=[evt.event_id],
                     tool_name=tool,

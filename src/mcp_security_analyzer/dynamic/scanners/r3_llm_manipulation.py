@@ -83,6 +83,12 @@ class R3LlmManipulationScanner(BaseScanner):
                 risk_type=RiskType.R3,
                 severity=sev,
                 confidence=0.8,
+                kind=(
+                    "r3.invisible_unicode_zw"
+                    if reason in ("hidden-unicode-in-name", "hidden-unicode-in-text")
+                    else "r3.tool_name_collision" if reason == "tool-name-collision"
+                    else "r3.tool_desc_suspicious"
+                ),
                 title=f"Tool poisoning indicator: {reason} in '{tool_name}.{field}'",
                 description=(
                     f"Tool '{tool_name}' field '{field}' matches tool-poisoning pattern "
@@ -115,6 +121,7 @@ class R3LlmManipulationScanner(BaseScanner):
                     risk_type=RiskType.R3,
                     severity=_sev(m.severity),
                     confidence=0.8,
+                    kind="r3.response_injection",
                     title=f"Tool-return injection: '{m.pattern_name}'",
                     description=(
                         f"A tool response contains pattern '{m.pattern_name}' "
@@ -154,6 +161,7 @@ class R3LlmManipulationScanner(BaseScanner):
                         risk_type=RiskType.R3,
                         severity=Severity.HIGH,
                         confidence=0.8,
+                        kind="r3.resource_indirect_injection",
                         title=f"Indirect prompt injection in resource '{uri}'",
                         description=(
                             f"Resource body at '{uri}' contains injection patterns "
@@ -168,6 +176,7 @@ class R3LlmManipulationScanner(BaseScanner):
                         risk_type=RiskType.R3,
                         severity=Severity.MEDIUM,
                         confidence=0.7,
+                        kind="r3.resource_anomaly",
                         title=f"Resource anomaly: {hit.get('reason')} at '{uri}'",
                         description=str(hit),
                         related_events=[evt.event_id],

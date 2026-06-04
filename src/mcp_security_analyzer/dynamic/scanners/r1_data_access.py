@@ -96,6 +96,7 @@ class R1DataAccessScanner(BaseScanner):
                         risk_type=RiskType.R1,
                         severity=Severity.HIGH,
                         confidence=0.85,
+                        kind="r1.sensitive_read",
                         title=f"Access to sensitive path: {path}",
                         description=(
                             f"Server performed '{evt.type}' on '{path}', "
@@ -117,6 +118,7 @@ class R1DataAccessScanner(BaseScanner):
                 risk_type=RiskType.R1,
                 severity=Severity.CRITICAL,
                 confidence=0.95,
+                kind="r1.honeypot_access",
                 title=f"Honeypot file accessed: {evt.data.get('path', '?')}",
                 description="Server accessed a honeypot decoy file planted for detection.",
                 related_events=[evt.event_id],
@@ -128,6 +130,7 @@ class R1DataAccessScanner(BaseScanner):
                 risk_type=RiskType.R1,
                 severity=Severity.CRITICAL,
                 confidence=0.95,
+                kind="r1.canary_leak",
                 title="Canary string leaked in server response",
                 description=(
                     f"A honeypot canary UUID was found in a server response, "
@@ -290,6 +293,10 @@ def _build_network_finding(
         risk_type=RiskType.R1,
         severity=severity,
         confidence=confidence,
+        # cloud-metadata is a credential-disclosure pivot (TAKEOVER); other
+        # SSRF-shaped destinations are PARTIAL_CI network egress. Blocked/loopback
+        # degradation to LIMITED is a follow-up calibration (see §9 R1 note).
+        kind="r1.cloud_metadata" if klass == "cloud_metadata" else "r1.network_egress",
         title=title,
         description=description,
         related_events=[evt_id for evt_id, _ in hits],

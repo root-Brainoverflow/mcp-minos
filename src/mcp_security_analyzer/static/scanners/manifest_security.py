@@ -124,6 +124,12 @@ def _check_install_scripts(scripts: dict, label: str) -> list[StaticFinding]:
                 risk_type=RiskType.R2,
                 severity=Severity.HIGH,
                 confidence=0.7,
+                kind=(
+                    "static.decode_exec_hook"
+                    if any(t in ("curl-pipe-sh", "eval", "node-eval", "python-exec-c",
+                                 "base64-decode", "remote-fetch") for t in matched_tags)
+                    else "static.encoded_payload_inline"
+                ),
                 title=f"Install hook '{hook}' runs a high-risk command",
                 description=(
                     f"The npm '{hook}' script executes on every install and "
@@ -142,6 +148,7 @@ def _check_install_scripts(scripts: dict, label: str) -> list[StaticFinding]:
                 risk_type=RiskType.R2,
                 severity=Severity.LOW,
                 confidence=0.25,
+                kind="static.install_hook",
                 title=f"Install hook '{hook}' present",
                 description=(
                     f"The npm '{hook}' script runs on install. No high-risk "
@@ -195,6 +202,7 @@ def _check_dependency_names(names: set[str], label: str) -> list[StaticFinding]:
                 risk_type=RiskType.R2,
                 severity=Severity.CRITICAL,
                 confidence=0.9,
+                kind="static.malicious_package",
                 title=f"Known-malicious dependency '{name}'",
                 description=(
                     f"'{name}' appears on the known-malicious package list. "
@@ -213,6 +221,7 @@ def _check_dependency_names(names: set[str], label: str) -> list[StaticFinding]:
                 risk_type=RiskType.R2,
                 severity=Severity.MEDIUM,
                 confidence=0.4,
+                kind="static.typosquat",
                 title=f"Possible typosquat: '{name}' vs '{squat}'",
                 description=(
                     f"Dependency '{name}' is one character different from the "

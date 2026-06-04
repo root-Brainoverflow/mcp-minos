@@ -82,6 +82,7 @@ def _missing_on_runtime(
             risk_type=RiskType.R4,
             severity=Severity.INFO,
             confidence=0.2,
+            kind="static.metadata_divergence",
             title=f"Tool '{name}' defined in source but not exposed at runtime",
             description=(
                 f"Source extraction found tool '{name}' but the runtime "
@@ -115,6 +116,7 @@ def _missing_on_source(
             risk_type=RiskType.R4,
             severity=Severity.LOW,
             confidence=0.35,
+            kind="static.metadata_divergence",
             title=f"Tool '{name}' exposed at runtime but not found in source",
             description=(
                 f"The runtime tools/list response advertises tool '{name}' "
@@ -151,6 +153,7 @@ def _description_differs(
             risk_type=RiskType.R4,
             severity=severity,
             confidence=confidence,
+            kind="static.metadata_divergence",
             title=f"Tool '{name}' description differs between source and runtime",
             description=(
                 f"{summary} "

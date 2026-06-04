@@ -34,6 +34,31 @@ class Severity(str, Enum):
     INFO = "INFO"
 
 
+class Impact(str, Enum):
+    """CIA-based worst-case impact of a finding if realised.
+
+    See docs/severity-verdict-model.md §3. One of the two axes (with Evidence)
+    that determine severity (§5) and the verdict (§8).
+    """
+
+    TAKEOVER = "TAKEOVER"          # arbitrary code/file/secret control — host takeover
+    PARTIAL_CI = "PARTIAL_CI"      # partial confidentiality or integrity compromise
+    AVAILABILITY = "AVAILABILITY"  # process down (crash/OOM) — local, restartable
+    LIMITED = "LIMITED"            # minor C/I/A (info leak, degraded perf, metadata)
+
+
+class Evidence(str, Enum):
+    """Directness of observation backing a finding.
+
+    See docs/severity-verdict-model.md §4. REALIZED and DETERMINISTIC are the
+    "strong evidence" classes (treated alike by §5 severity and §8 verdict).
+    """
+
+    REALIZED = "REALIZED"            # observed as real runtime behaviour (§4.2)
+    DETERMINISTIC = "DETERMINISTIC"  # static but ~0 false-positive (§4.3) — strong
+    POTENTIAL = "POTENTIAL"          # single static / heuristic signal — unconfirmed
+
+
 # ---------------------------------------------------------------------------
 # MCP metadata
 # ---------------------------------------------------------------------------
@@ -93,6 +118,15 @@ class Finding(BaseModel):
     tool_name: str | None = None
     reproduction: str
     detected_at: datetime = Field(default_factory=_utcnow)
+
+    # Classification for the severity/verdict model (docs/severity-verdict-model.md).
+    # `kind` is the catalog lookup key (output.policy); `impact`/`evidence` are
+    # normally derived from `kind` but may be set explicitly by a scanner. When
+    # these are present the verdict engine ignores the scanner-set `severity`
+    # above and recomputes it via the §5 LUT.
+    kind: str | None = None
+    impact: Impact | None = None
+    evidence: Evidence | None = None
 
 
 # ---------------------------------------------------------------------------

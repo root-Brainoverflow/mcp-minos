@@ -95,15 +95,36 @@ class Reporter:
         ]
 
         # ── Verdict banner ────────────────────────────────────────────
-        verdict_icon = {"REJECT": "🚫", "CONDITIONAL": "⚠️", "APPROVE": "✅"}.get(
-            scores.verdict, "❓"
-        )
-        lines += [
-            "## Verdict",
-            "",
-            f"> {verdict_icon} **{scores.verdict}** — overall risk score: `{scores.overall:.2f}`",
-            "",
-        ]
+        # New severity/verdict model (docs/severity-verdict-model.md), carried in
+        # metadata; fall back to the legacy continuous score if absent.
+        v = (output.metadata or {}).get("verdict") or {}
+        decision = v.get("decision")
+        if decision:
+            icon = {"REJECT": "🚫", "PASS": "✅", "ERROR": "⚠️"}.get(decision, "❓")
+            lines += ["## Verdict", "", f"> {icon} **{decision}**"]
+            if decision == "ERROR":
+                lines.append(
+                    f">\n> 검사 불가 (untestable): {v.get('error_message') or v.get('error_code') or ''}"
+                )
+            reasons = v.get("reasons") or []
+            if reasons:
+                uniq = sorted({r.get("reason") for r in reasons if r.get("reason")})
+                lines.append(f">\n> **사유:** {', '.join(uniq)}")
+            warnings = v.get("warnings") or {}
+            if warnings:
+                wl = ", ".join(f"{k} ({n})" for k, n in warnings.items())
+                lines.append(f">\n> **경고:** {wl}")
+            lines.append("")
+        else:
+            verdict_icon = {"REJECT": "🚫", "CONDITIONAL": "⚠️", "APPROVE": "✅"}.get(
+                scores.verdict, "❓"
+            )
+            lines += [
+                "## Verdict",
+                "",
+                f"> {verdict_icon} **{scores.verdict}** — overall risk score: `{scores.overall:.2f}`",
+                "",
+            ]
 
         # ── Risk score summary table ───────────────────────────────────
         lines += [

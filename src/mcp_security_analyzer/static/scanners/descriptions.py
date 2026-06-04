@@ -68,12 +68,18 @@ def _card(
     )
 
 # Invisible / control characters that should never appear in a human-written
-# description. Zero-width space/joiner, BOM, bidi overrides, Unicode tag chars.
-_INVISIBLE_CHARS = {
+# description, split by class (see severity-verdict-model.md §4.4).
+# Zero-width chars legitimately appear in i18n / emoji / copy-paste → POTENTIAL.
+_ZW_CHARS = {
     "​", "‌", "‍", "⁠", "﻿",
+}
+# Bidi embed/override/PDF + isolates \u2014 no legitimate use in a description \u2192
+# DETERMINISTIC (block), same class as the tag block.
+_BIDI_CHARS = {
     "\u202A", "\u202B", "\u202C", "\u202D", "\u202E",
     "\u2066", "\u2067", "\u2068", "\u2069",
 }
+_INVISIBLE_CHARS = _ZW_CHARS | _BIDI_CHARS
 _TAG_RANGE = range(0xE0000, 0xE0080)  # Unicode tag block (used for hidden text)
 
 _ROLE_OVERRIDE_CARDS: tuple[_RuleCard, ...] = (
@@ -289,13 +295,17 @@ def _scan_text(
     (tool, check kind) so a noisy field doesn't multiply the same risk."""
     out: list[StaticFinding] = []
 
-    invisible = _find_invisible(text)
+    det_invisible, zw_invisible = _find_invisible(text)
+    invisible = det_invisible + zw_invisible
     if invisible and tool_name not in seen_invisible:
         seen_invisible.add(tool_name)
         out.append(StaticFinding(
             risk_type=RiskType.R3,
             severity=Severity.CRITICAL,
             confidence=0.85,
+            # Bidi/tag/other-control chars have no legitimate use → DETERMINISTIC
+            # (block); a lone zero-width can be benign i18n/emoji → POTENTIAL (warn).
+            kind="r3.invisible_unicode_bidi" if det_invisible else "r3.invisible_unicode_zw",
             title="Invisible Unicode in tool metadata",
             description=(
                 f"Field '{field_label}' contains non-printing characters "
@@ -318,6 +328,7 @@ def _scan_text(
                     risk_type=RiskType.R3,
                     severity=Severity.HIGH,
                     confidence=0.6,
+                    kind="static.tool_desc_suspicious",
                     title=f"Instruction-injection phrasing in tool metadata ({card.rule_id})",
                     description=_rule_card_finding_text(
                         card,
@@ -341,6 +352,7 @@ def _scan_text(
                     risk_type=RiskType.R3,
                     severity=Severity.HIGH,
                     confidence=0.5,
+                    kind="static.tool_desc_suspicious",
                     title=f"Hidden instruction block in tool metadata ({card.rule_id})",
                     description=_rule_card_finding_text(
                         card,
@@ -362,6 +374,7 @@ def _scan_text(
             risk_type=RiskType.R3,
             severity=Severity.MEDIUM,
             confidence=0.4,
+            kind="static.encoded_payload_inline",
             title="Encoded payload in tool metadata",
             description=(
                 f"Field '{field_label}' contains a long base64/URL-encoded "
@@ -392,15 +405,23 @@ def _rule_card_finding_text(card: _RuleCard, *, field_label: str, matched: str) 
     return " ".join(parts)
 
 
-def _find_invisible(text: str) -> list[str]:
-    """Return human-readable names of invisible/control code points present."""
-    found: dict[str, None] = {}
+def _find_invisible(text: str) -> tuple[list[str], list[str]]:
+    """Return (deterministic, zero_width) names of invisible code points present.
+
+    Bidi-override/isolate/tag-block and any other format/control char have no
+    legitimate reason in a description → 'deterministic' (DETERMINISTIC class →
+    block). Zero-width chars can appear in i18n / emoji → 'zero_width'
+    (POTENTIAL class → warn). See severity-verdict-model.md §4.4.
+    """
+    det: dict[str, None] = {}
+    zw: dict[str, None] = {}
     for ch in text:
         cp = ord(ch)
-        if ch in _INVISIBLE_CHARS or cp in _TAG_RANGE:
-            found[f"U+{cp:04X}"] = None
-            continue
-        # Other format/control categories (Cf, Cc) excluding common whitespace.
-        if ch not in ("\n", "\r", "\t") and unicodedata.category(ch) in ("Cf", "Cc"):
-            found[f"U+{cp:04X}"] = None
-    return list(found.keys())
+        if ch in _ZW_CHARS:
+            zw[f"U+{cp:04X}"] = None
+        elif ch in _BIDI_CHARS or cp in _TAG_RANGE:
+            det[f"U+{cp:04X}"] = None
+        elif ch not in ("\n", "\r", "\t") and unicodedata.category(ch) in ("Cf", "Cc"):
+            # other format/control categories — no legitimate use → deterministic
+            det[f"U+{cp:04X}"] = None
+    return list(det.keys()), list(zw.keys())
