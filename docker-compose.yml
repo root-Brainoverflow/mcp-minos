@@ -1,0 +1,32 @@
+# mcp-minos — full stack: FastAPI read-API + React (nginx) frontend.
+#
+#   docker compose up --build
+#   → frontend  http://localhost:3000
+#   → backend   http://localhost:8000  (docs at /docs)
+
+services:
+  backend:
+    build:
+      context: ./backend
+    image: mcp-minos-backend
+    environment:
+      MINOS_RESULTS_DIR: /app/results
+      MINOS_CORS_ORIGINS: "*"
+    ports:
+      - "8000:8000"
+    volumes:
+      # Reflect host scan output without a rebuild (read-only).
+      - ./backend/results:/app/results:ro
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE: /api
+    image: mcp-minos-frontend
+    depends_on:
+      - backend
+    ports:
+      - "3000:80"
+    restart: unless-stopped

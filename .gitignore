@@ -17,6 +17,13 @@ env/
 # uv
 uv.lock
 
+# Node / frontend
+node_modules/
+.vite/
+*.local
+.env
+.env.*.local
+
 # Testing
 .pytest_cache/
 .coverage

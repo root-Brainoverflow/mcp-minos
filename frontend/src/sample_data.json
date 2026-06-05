@@ -1,0 +1,337 @@
+{
+  "RISK_META": {
+    "R1": { "code": "R1", "name": "Data Access", "full": "Unauthorized Data Access / Exfiltration" },
+    "R2": { "code": "R2", "name": "Code Exec", "full": "Unauthorized Code / Command Execution" },
+    "R3": { "code": "R3", "name": "LLM Manipulation", "full": "LLM Behavior Manipulation" },
+    "R4": { "code": "R4", "name": "Behavior Drift", "full": "Behavioral Inconsistency / Deception" },
+    "R5": { "code": "R5", "name": "Input Validation", "full": "Input Handling Vulnerabilities" },
+    "R6": { "code": "R6", "name": "Stability", "full": "Service Stability Threats" }
+  },
+  "SEVERITY_ORDER": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"],
+  "SOURCE_LABELS": {
+    "claude-desktop": "Claude Desktop",
+    "claude-code": "Claude Code",
+    "cursor": "Cursor",
+    "vscode": "VS Code"
+  },
+  "DISCOVERED_SERVERS": [
+    {
+      "name": "redis",
+      "source": "claude-desktop",
+      "sourcePath": "~/Library/Application Support/Claude/claude_desktop_config.json",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-redis", "redis://127.0.0.1:6379"],
+      "transport": "stdio",
+      "lastScan": { "verdict": "CONDITIONAL", "at": "2026-05-24T17:38Z" }
+    },
+    {
+      "name": "filesystem",
+      "source": "claude-desktop",
+      "sourcePath": "~/Library/Application Support/Claude/claude_desktop_config.json",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/dev/projects"],
+      "transport": "stdio",
+      "lastScan": { "verdict": "APPROVE", "at": "2026-05-20T11:02Z" }
+    },
+    {
+      "name": "github",
+      "source": "cursor",
+      "sourcePath": "~/.cursor/mcp.json",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "transport": "stdio",
+      "lastScan": null
+    },
+    {
+      "name": "puppeteer",
+      "source": "vscode",
+      "sourcePath": "~/.config/Code/User/settings.json",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-puppeteer"],
+      "transport": "stdio",
+      "lastScan": { "verdict": "REJECT", "at": "2026-05-18T09:41Z" }
+    },
+    {
+      "name": "weather-api",
+      "source": "claude-code",
+      "sourcePath": "~/.claude.json",
+      "command": "uvx",
+      "args": ["weather-mcp", "--api-key", "env:WEATHER_KEY"],
+      "transport": "stdio",
+      "lastScan": null
+    }
+  ],
+  "SERVER": {
+    "name": "redis",
+    "display": "npx -y @modelcontextprotocol/server-redis redis://127.0.0.1:6379",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-redis", "redis://127.0.0.1:6379"]
+  },
+  "SESSION": {
+    "session_id": "ses-894ebdc2-71b1-4249-b0a1-2980b55f5bca",
+    "generated": "2026-05-24 17:38 UTC",
+    "duration_sec": 615.11,
+    "verdict": "CONDITIONAL",
+    "overall_score": 0.4625,
+    "tools_tested": 0,
+    "total_events": 15
+  },
+  "RISK_SCORES": { "R1": 0.0, "R2": 0.0, "R3": 0.0, "R4": 0.0, "R5": 0.0, "R6": 0.4625 },
+  "DYNAMIC_FINDINGS": [
+    {
+      "finding_id": "fnd-e90295ad-a172-4ca9-9910-8c059810186d",
+      "risk_type": "R6",
+      "severity": "HIGH",
+      "confidence": 0.9,
+      "title": "Server crashed during sequence 'fuzz_input_validation'",
+      "description": "The MCP server process terminated unexpectedly while running test sequence 'fuzz_input_validation'. This indicates fragile error handling that could be exploited for DoS.",
+      "related_events": ["evt-d0ee6dba-7ac9-4f80-ac29-15cd3db9124c"],
+      "tool_name": null,
+      "reproduction": "Run sequence 'fuzz_input_validation' and observe server process",
+      "detected_at": "2026-05-24T17:38:14.708314Z",
+      "phase": "dynamic",
+      "scanner": "r6_stability"
+    },
+    {
+      "finding_id": "fnd-bd7300f3-d1d1-49d1-844e-23acc32e4e0a",
+      "risk_type": "R6",
+      "severity": "LOW",
+      "confidence": 0.5,
+      "title": "Sequence timeout: 'init_enumerate'",
+      "description": "Test sequence 'init_enumerate' did not complete within its timeout. This can indicate a server hang, slow outbound calls (retrieval / API-wrapping tools), or an undersized scan budget. Per-tool client_timeout findings, when present, localise the cause.",
+      "related_events": ["evt-cd02095f-b58f-42c5-9bf9-892f9ef2852f", "evt-377dc318-85b3-4111-b7ea-e63b6a56d83b"],
+      "tool_name": null,
+      "reproduction": "Run sequence 'init_enumerate' with its specific inputs",
+      "detected_at": "2026-05-24T17:38:14.708564Z",
+      "phase": "dynamic",
+      "scanner": "r6_stability"
+    },
+    {
+      "finding_id": "fnd-72a4a715-25a2-410f-9b7a-e86b230b9450",
+      "risk_type": "R6",
+      "severity": "LOW",
+      "confidence": 0.5,
+      "title": "Sequence timeout: 'fuzz_input_validation'",
+      "description": "Test sequence 'fuzz_input_validation' did not complete within its timeout. This can indicate a server hang, slow outbound calls (retrieval / API-wrapping tools), or an undersized scan budget. Per-tool client_timeout findings, when present, localise the cause.",
+      "related_events": ["evt-322a9490-bbb3-419f-bab9-ba38bc2820ae", "evt-92c0fe1c-c106-4471-ac88-d8bd1196aa4b"],
+      "tool_name": null,
+      "reproduction": "Run sequence 'fuzz_input_validation' with its specific inputs",
+      "detected_at": "2026-05-24T17:38:14.709753Z",
+      "phase": "dynamic",
+      "scanner": "r6_stability"
+    }
+  ],
+  "STATIC_FINDINGS": [
+    {
+      "finding_id": "st-r5-set-value",
+      "risk_type": "R5",
+      "severity": "MEDIUM",
+      "confidence": 0.45,
+      "title": "Unconstrained string parameter 'value' on tool 'set'",
+      "description": "Parameter 'value' accepts an arbitrary string with no maxLength, pattern, or format constraint. Unbounded inputs widen the fuzzing surface and can pass oversized payloads straight to the backend.",
+      "scanner": "schema_audit",
+      "location": "tool:set.value",
+      "evidence": "{ \"type\": \"string\" }  // no maxLength / pattern",
+      "tool_name": "set",
+      "tags": ["unconstrained-string"],
+      "phase": "static"
+    },
+    {
+      "finding_id": "st-r5-key-pattern",
+      "risk_type": "R5",
+      "severity": "LOW",
+      "confidence": 0.35,
+      "title": "Key parameter accepts unvalidated glob on tool 'list'",
+      "description": "Parameter 'pattern' is forwarded to a Redis KEYS/SCAN glob without validation. A broad pattern (e.g. '*') can enumerate the entire keyspace — a weak data-exposure signal worth corroborating dynamically.",
+      "scanner": "schema_audit",
+      "location": "tool:list.pattern",
+      "evidence": "{ \"type\": \"string\", \"default\": \"*\" }",
+      "tool_name": "list",
+      "tags": ["unconstrained-string", "broad-default"],
+      "phase": "static"
+    },
+    {
+      "finding_id": "st-r1-delete-scope",
+      "risk_type": "R1",
+      "severity": "LOW",
+      "confidence": 0.3,
+      "title": "Destructive tool 'delete' exposes unrestricted key access",
+      "description": "Tool 'delete' removes any key by name with no namespace prefix or allowlist. Combined with 'list', an agent can enumerate then delete arbitrary keys. Low-confidence design signal — confirm whether the deployment scopes the connection.",
+      "scanner": "descriptions",
+      "location": "tool:delete",
+      "evidence": null,
+      "tool_name": "delete",
+      "tags": ["broad-scope"],
+      "phase": "static"
+    },
+    {
+      "finding_id": "st-r6-manifest-pin",
+      "risk_type": "R6",
+      "severity": "INFO",
+      "confidence": 0.2,
+      "title": "Dependency not version-pinned in manifest",
+      "description": "package.json launches the server via an unpinned '-y @modelcontextprotocol/server-redis' (latest). Unpinned resolution means the audited build can differ from the deployed one. Informational — pin the version for reproducible scans.",
+      "scanner": "manifest_security",
+      "location": "package.json (dependencies)",
+      "evidence": "\"@modelcontextprotocol/server-redis\": \"latest\"",
+      "tool_name": null,
+      "tags": ["unpinned-dependency"],
+      "phase": "static"
+    }
+  ],
+  "STATIC_META": {
+    "tool_source": "source",
+    "tools_analyzed": 4,
+    "scanners_run": ["manifest_security", "semgrep", "descriptions", "schema_audit"],
+    "scanners_skipped": ["metadata_divergence"],
+    "tools": ["set", "get", "delete", "list"]
+  },
+  "EVENTS": [
+    { "event_id": "evt-7f10…init", "ts": "17:28:01.133", "source": "protocol", "type": "mcp_request", "direction": "c2s", "variation_tag": null, "data": { "method": "initialize", "id": 1 } },
+    { "event_id": "evt-cd02095f", "ts": "17:29:01.137", "source": "test", "type": "sequence_timeout", "direction": null, "variation_tag": null, "data": { "sequence": "init_enumerate" } },
+    { "event_id": "evt-377dc318", "ts": "17:29:01.140", "source": "protocol", "type": "mcp_request", "direction": "c2s", "variation_tag": null, "data": { "method": "tools/list", "id": 2 } },
+    { "event_id": "evt-d0ee6dba", "ts": "17:30:14.183", "source": "test", "type": "server_crash", "direction": null, "variation_tag": null, "data": { "sequence": "fuzz_input_validation" } },
+    { "event_id": "evt-9f3b…re", "ts": "17:30:17.886", "source": "protocol", "type": "mcp_request", "direction": "c2s", "variation_tag": null, "data": { "method": "initialize", "id": 1, "note": "restart 1/3" } },
+    { "event_id": "evt-322a9490", "ts": "17:31:17.889", "source": "test", "type": "sequence_timeout", "direction": null, "variation_tag": null, "data": { "sequence": "fuzz_input_validation" } },
+    { "event_id": "evt-f77c…tl", "ts": "17:31:17.891", "source": "protocol", "type": "mcp_request", "direction": "c2s", "variation_tag": null, "data": { "method": "tools/list", "id": 2 } },
+    { "event_id": "evt-92c0fe1c", "ts": "17:32:21.987", "source": "test", "type": "server_crash", "direction": null, "variation_tag": null, "data": { "sequence": "fuzz_input_validation" } },
+    { "event_id": "evt-9f3b617b", "ts": "17:32:23.848", "source": "protocol", "type": "mcp_request", "direction": "c2s", "variation_tag": "env_0", "data": { "method": "initialize", "id": 1, "note": "restart 2/3" } },
+    { "event_id": "evt-4b1af31d", "ts": "17:33:23.849", "source": "test", "type": "sequence_timeout", "direction": null, "variation_tag": "env_0", "data": { "sequence": "init_enumerate" } },
+    { "event_id": "evt-74992ba5", "ts": "17:33:23.850", "source": "protocol", "type": "mcp_request", "direction": "c2s", "variation_tag": "env_0", "data": { "method": "tools/list", "id": 2 } },
+    { "event_id": "evt-9b16955e", "ts": "17:34:35.382", "source": "test", "type": "server_crash", "direction": null, "variation_tag": "env_1", "data": { "sequence": "fuzz_input_validation" } },
+    { "event_id": "evt-37131565", "ts": "17:34:37.457", "source": "protocol", "type": "mcp_request", "direction": "c2s", "variation_tag": "env_1", "data": { "method": "initialize", "id": 1, "note": "restart 3/3" } },
+    { "event_id": "evt-8b3d3d6d", "ts": "17:35:51.079", "source": "test", "type": "sequence_timeout", "direction": null, "variation_tag": "env_1", "data": { "sequence": "init_enumerate" } },
+    { "event_id": "evt-13448de7", "ts": "17:35:51.093", "source": "protocol", "type": "mcp_request", "direction": "c2s", "variation_tag": "env_1", "data": { "method": "tools/list", "id": 2 } }
+  ],
+  "SCAN_TIMELINE": [
+    { "phase": "static", "label": "Collecting environment snapshot", "detail": "origin=tarball  coverage=partial  package=@modelcontextprotocol/server-redis", "ms": 1400 },
+    { "phase": "static", "label": "Static scanners", "detail": "manifest_security · semgrep · descriptions · schema_audit — 4 findings", "ms": 1600 },
+    { "phase": "dynamic", "label": "Building sandbox image", "detail": "docker/Dockerfile.sandbox · seccomp profile applied", "ms": 1500 },
+    { "phase": "dynamic", "label": "Booting server in sandbox", "detail": "npx -y @modelcontextprotocol/server-redis", "ms": 1200 },
+    { "phase": "dynamic", "label": "init_enumerate", "detail": "initialize → tools/list", "ms": 1400, "status": "timeout" },
+    { "phase": "dynamic", "label": "fuzz_input_validation", "detail": "type-confusion + boundary payloads", "ms": 1300, "status": "crash" },
+    { "phase": "dynamic", "label": "Server crashed — restarting sandbox (1/3)", "detail": "crash_signature carried forward, category skipped on rerun", "ms": 1200, "status": "crash" },
+    { "phase": "dynamic", "label": "Re-running remaining sequences", "detail": "env_0 · env_1 environment variations", "ms": 1500, "status": "timeout" },
+    { "phase": "analysis", "label": "Correlating events", "detail": "15 events · 6 scanners (R1–R6)", "ms": 1200 },
+    { "phase": "analysis", "label": "Scoring & verdict", "detail": "overall 0.46 → CONDITIONAL", "ms": 1000 }
+  ],
+  "OVERVIEW": {
+    "servers_discovered": 5,
+    "clients": 4,
+    "sources": { "claude-desktop": 2, "cursor": 1, "vscode": 1, "claude-code": 1 },
+    "scans_run": 14,
+    "scans_this_week": 3,
+    "open_findings": 18,
+    "critical_high": 6,
+    "by_severity": { "CRITICAL": 2, "HIGH": 4, "MEDIUM": 3, "LOW": 7, "INFO": 2 },
+    "verdict_mix": { "APPROVE": 2, "CONDITIONAL": 1, "REJECT": 1, "UNSCANNED": 1 },
+    "at_risk": 2,
+    "risk_scores": { "R1": 0.30, "R2": 0.80, "R3": 0.10, "R4": 0.05, "R5": 0.35, "R6": 0.4625 },
+    "findings_over_time": [2, 5, 3, 8, 4, 6, 7, 9],
+    "static_findings": 11,
+    "dynamic_findings": 7
+  },
+  "RECENT_SESSIONS": [
+    { "session_id": "ses-894ebdc2", "server": "redis", "command": "npx -y @modelcontextprotocol/server-redis …", "source": "claude-desktop", "verdict": "CONDITIONAL", "overall_score": 0.4625, "by_severity": { "HIGH": 1, "MEDIUM": 1, "LOW": 4, "INFO": 1 }, "tools_tested": 0, "duration_sec": 615, "at": "2026-05-24T17:38Z", "real": true },
+    { "session_id": "ses-7af31c02", "server": "puppeteer", "command": "npx -y @modelcontextprotocol/server-puppeteer", "source": "vscode", "verdict": "REJECT", "overall_score": 0.80, "by_severity": { "CRITICAL": 2, "HIGH": 2 }, "tools_tested": 7, "duration_sec": 488, "at": "2026-05-18T09:41Z" },
+    { "session_id": "ses-22b9e15d", "server": "filesystem", "command": "npx -y @modelcontextprotocol/server-filesystem /Users/dev/projects", "source": "claude-desktop", "verdict": "APPROVE", "overall_score": 0.08, "by_severity": { "LOW": 1, "INFO": 1 }, "tools_tested": 11, "duration_sec": 142, "at": "2026-05-20T11:02Z" },
+    { "session_id": "ses-0c4d77a1", "server": "github", "command": "npx -y @modelcontextprotocol/server-github", "source": "cursor", "verdict": "APPROVE", "overall_score": 0.12, "by_severity": { "MEDIUM": 1, "LOW": 2 }, "tools_tested": 26, "duration_sec": 263, "at": "2026-05-22T14:10Z" }
+  ],
+  "SCAN_SESSIONS": [
+    { "session_id": "ses-894ebdc2", "server": "redis", "command": "npx -y @modelcontextprotocol/server-redis redis://127.0.0.1:6379", "source": "claude-desktop", "verdict": "CONDITIONAL", "overall_score": 0.4625, "findings": 7, "by_severity": { "HIGH": 1, "MEDIUM": 1, "LOW": 4, "INFO": 1 }, "tools_tested": 0, "static_n": 4, "dynamic_n": 3, "duration_sec": 615, "at": "2026-05-24T17:38Z", "real": true },
+    { "session_id": "ses-0c4d77a1", "server": "github", "command": "npx -y @modelcontextprotocol/server-github", "source": "cursor", "verdict": "APPROVE", "overall_score": 0.12, "findings": 3, "by_severity": { "MEDIUM": 1, "LOW": 2 }, "tools_tested": 26, "static_n": 2, "dynamic_n": 1, "duration_sec": 263, "at": "2026-05-22T14:10Z" },
+    { "session_id": "ses-22b9e15d", "server": "filesystem", "command": "npx -y @modelcontextprotocol/server-filesystem /Users/dev/projects", "source": "claude-desktop", "verdict": "APPROVE", "overall_score": 0.08, "findings": 2, "by_severity": { "LOW": 1, "INFO": 1 }, "tools_tested": 11, "static_n": 1, "dynamic_n": 1, "duration_sec": 142, "at": "2026-05-20T11:02Z" },
+    { "session_id": "ses-7af31c02", "server": "puppeteer", "command": "npx -y @modelcontextprotocol/server-puppeteer", "source": "vscode", "verdict": "REJECT", "overall_score": 0.80, "findings": 6, "by_severity": { "CRITICAL": 2, "HIGH": 2, "MEDIUM": 1, "LOW": 1 }, "tools_tested": 7, "static_n": 2, "dynamic_n": 4, "duration_sec": 488, "at": "2026-05-18T09:41Z" },
+    { "session_id": "ses-5ab7f6f4", "server": "weather-api", "command": "uvx weather-mcp --api-key env:WEATHER_KEY", "source": "claude-code", "verdict": "CONDITIONAL", "overall_score": 0.38, "findings": 4, "by_severity": { "MEDIUM": 2, "LOW": 1, "INFO": 1 }, "tools_tested": 3, "static_n": 3, "dynamic_n": 1, "duration_sec": 207, "at": "2026-05-15T08:55Z" },
+    { "session_id": "ses-f175db4c", "server": "redis", "command": "npx -y @modelcontextprotocol/server-redis redis://127.0.0.1:6379", "source": "claude-desktop", "verdict": "CONDITIONAL", "overall_score": 0.51, "findings": 8, "by_severity": { "HIGH": 1, "MEDIUM": 2, "LOW": 4, "INFO": 1 }, "tools_tested": 4, "static_n": 4, "dynamic_n": 4, "duration_sec": 642, "at": "2026-05-10T16:20Z" },
+    { "session_id": "ses-fa769997", "server": "filesystem", "command": "npx -y @modelcontextprotocol/server-filesystem /Users/dev/projects", "source": "claude-desktop", "verdict": "APPROVE", "overall_score": 0.10, "findings": 2, "by_severity": { "LOW": 2 }, "tools_tested": 11, "static_n": 1, "dynamic_n": 1, "duration_sec": 155, "at": "2026-05-06T10:14Z" },
+    { "session_id": "ses-b9a5dd2b", "server": "puppeteer", "command": "npx -y @modelcontextprotocol/server-puppeteer", "source": "vscode", "verdict": "REJECT", "overall_score": 0.72, "findings": 5, "by_severity": { "CRITICAL": 1, "HIGH": 2, "MEDIUM": 2 }, "tools_tested": 9, "static_n": 2, "dynamic_n": 3, "duration_sec": 451, "at": "2026-04-29T13:33Z" }
+  ],
+  "RULESET": {
+    "packs": [
+      {
+        "risk": "R1", "file": "r1-data-access.yaml",
+        "summary": "Secret-shaped env reads and broad filesystem traversal — correlated with exfiltration signals.",
+        "rules": [
+          { "id": "mcp-r1-env-secret-access", "lang": "python", "level": "INFO", "confidence": "low", "desc": "Reads a secret-shaped environment variable (secret/token/api_key/password)." },
+          { "id": "mcp-r1-env-secret-access-node", "lang": "js · ts", "level": "INFO", "confidence": "low", "desc": "Reads a secret-shaped property of process.env." },
+          { "id": "mcp-r1-broad-file-read", "lang": "python", "level": "WARNING", "confidence": "low", "desc": "Broad filesystem traversal from a system root (os.walk('/'), glob '/**')." }
+        ]
+      },
+      {
+        "risk": "R2", "file": "r2-dangerous-exec.yaml",
+        "summary": "Direct command execution, dynamic eval and runtime package installs.",
+        "rules": [
+          { "id": "mcp-r2-python-command-exec", "lang": "python", "level": "WARNING", "confidence": "low", "desc": "os.system / subprocess.* process execution." },
+          { "id": "mcp-r2-node-command-exec", "lang": "js · ts", "level": "WARNING", "confidence": "low", "desc": "child_process exec / spawn execution." },
+          { "id": "mcp-r2-python-dynamic-eval", "lang": "python", "level": "ERROR", "confidence": "medium", "desc": "eval/exec of a non-literal expression." },
+          { "id": "mcp-r2-node-dynamic-eval", "lang": "js · ts", "level": "ERROR", "confidence": "medium", "desc": "eval / new Function of a computed value." },
+          { "id": "mcp-r2-runtime-package-install", "lang": "python · js · ts", "level": "WARNING", "confidence": "medium", "desc": "Runtime pip/npm/pnpm/yarn install from server code." }
+        ]
+      },
+      {
+        "risk": "R4", "file": "r4-env-conditional.yaml",
+        "summary": "Anti-sandbox deception and time-gated logic bombs.",
+        "rules": [
+          { "id": "mcp-r4-sandbox-detection-python", "lang": "python", "level": "WARNING", "confidence": "medium", "desc": "Branches on a sandbox/CI/debug/container env variable." },
+          { "id": "mcp-r4-sandbox-detection-node", "lang": "js · ts", "level": "WARNING", "confidence": "medium", "desc": "Reads a sandbox/CI/debug env var to alter behaviour." },
+          { "id": "mcp-r4-time-conditional-python", "lang": "python", "level": "INFO", "confidence": "low", "desc": "Branches on current date/time (possible logic bomb)." },
+          { "id": "mcp-r4-time-conditional-node", "lang": "js · ts", "level": "INFO", "confidence": "low", "desc": "Branches on Date.now() to gate a delayed payload." }
+        ]
+      },
+      {
+        "risk": "R5", "file": "r5-input-validation.yaml",
+        "summary": "Injection-shaped sinks built from interpolated / concatenated strings.",
+        "rules": [
+          { "id": "mcp-r5-python-sql-fstring", "lang": "python", "level": "ERROR", "confidence": "medium", "desc": "SQL executed from an f-string / concatenation." },
+          { "id": "mcp-r5-python-path-traversal", "lang": "python", "level": "WARNING", "confidence": "low", "desc": "open() on an interpolated path with no normalisation." },
+          { "id": "mcp-r5-node-path-traversal", "lang": "js · ts", "level": "WARNING", "confidence": "low", "desc": "fs read/write from an interpolated path." },
+          { "id": "mcp-r5-node-shell-interpolation", "lang": "js · ts", "level": "ERROR", "confidence": "medium", "desc": "Shell command built from a template string." }
+        ]
+      },
+      {
+        "risk": "R5", "file": "r5-taint.yaml", "taint": true,
+        "summary": "Taint-mode: tool-handler input flowing to a dangerous sink without a sanitizer.",
+        "rules": [
+          { "id": "mcp-r5-python-command-injection-taint", "lang": "python", "level": "ERROR", "confidence": "high", "desc": "Tool input → shell exec (sanitizers: shlex.quote/split)." },
+          { "id": "mcp-r5-python-path-traversal-taint", "lang": "python", "level": "WARNING", "confidence": "high", "desc": "Tool input → fs path (sanitizers: realpath/resolve)." },
+          { "id": "mcp-r5-python-sql-injection-taint", "lang": "python", "level": "ERROR", "confidence": "high", "desc": "Tool input → SQL execute string." },
+          { "id": "mcp-r5-node-command-injection-taint", "lang": "js · ts", "level": "ERROR", "confidence": "high", "desc": "Handler input → child_process command string." },
+          { "id": "mcp-r5-node-path-traversal-taint", "lang": "js · ts", "level": "WARNING", "confidence": "high", "desc": "Handler input → fs.* path (sanitizers: path.normalize/resolve)." }
+        ]
+      },
+      {
+        "risk": "R6", "file": "r6-stability.yaml",
+        "summary": "Availability risks — unbounded reads and timeout-less network calls.",
+        "rules": [
+          { "id": "mcp-r6-python-http-no-timeout", "lang": "python", "level": "INFO", "confidence": "low", "desc": "requests.* call with no timeout." },
+          { "id": "mcp-r6-python-unbounded-read", "lang": "python", "level": "INFO", "confidence": "low", "desc": "Whole-file read into memory with no size bound." }
+        ]
+      }
+    ],
+    "scanners": [
+      { "id": "code_patterns", "name": "Semgrep patterns", "engine": "semgrep", "desc": "Runs the R1–R6 pattern packs (incl. taint mode) over extracted source." },
+      { "id": "manifest_security", "name": "Manifest security", "engine": "ast", "desc": "Audits package.json / pyproject for unpinned deps, install scripts, secret-shaped argv." },
+      { "id": "schema_audit", "name": "Schema audit", "engine": "ast", "desc": "Inspects each tool's input schema for unconstrained strings, missing bounds and broad defaults." },
+      { "id": "descriptions", "name": "Description audit", "engine": "heuristic", "desc": "Scans tool descriptions for prompt-injection phrasing and over-broad capability claims." },
+      { "id": "metadata_divergence", "name": "Metadata divergence", "engine": "ast", "desc": "Compares declared tool metadata against the source-extracted signatures for drift." }
+    ]
+  },
+  "FLEET_FINDINGS": [
+    { "finding_id": "st-r5-set-value", "risk_type": "R5", "severity": "MEDIUM", "confidence": 0.45, "title": "Unconstrained string parameter 'value' on tool 'set'", "description": "Parameter 'value' accepts an arbitrary string with no maxLength, pattern, or format constraint. Unbounded inputs widen the fuzzing surface and can pass oversized payloads straight to the backend.", "scanner": "schema_audit", "location": "tool:set.value", "evidence": "{ \"type\": \"string\" }  // no maxLength / pattern", "tool_name": "set", "tags": ["unconstrained-string"], "phase": "static", "server": "redis", "session_id": "ses-894ebdc2" },
+    { "finding_id": "st-r5-key-pattern", "risk_type": "R5", "severity": "LOW", "confidence": 0.35, "title": "Key parameter accepts unvalidated glob on tool 'list'", "description": "Parameter 'pattern' is forwarded to a Redis KEYS/SCAN glob without validation. A broad pattern (e.g. '*') can enumerate the entire keyspace — a weak data-exposure signal worth corroborating dynamically.", "scanner": "schema_audit", "location": "tool:list.pattern", "evidence": "{ \"type\": \"string\", \"default\": \"*\" }", "tool_name": "list", "tags": ["unconstrained-string", "broad-default"], "phase": "static", "server": "redis", "session_id": "ses-894ebdc2" },
+    { "finding_id": "st-r1-delete-scope", "risk_type": "R1", "severity": "LOW", "confidence": 0.3, "title": "Destructive tool 'delete' exposes unrestricted key access", "description": "Tool 'delete' removes any key by name with no namespace prefix or allowlist. Combined with 'list', an agent can enumerate then delete arbitrary keys. Low-confidence design signal — confirm whether the deployment scopes the connection.", "scanner": "descriptions", "location": "tool:delete", "evidence": null, "tool_name": "delete", "tags": ["broad-scope"], "phase": "static", "server": "redis", "session_id": "ses-894ebdc2" },
+    { "finding_id": "st-r6-manifest-pin", "risk_type": "R6", "severity": "INFO", "confidence": 0.2, "title": "Dependency not version-pinned in manifest", "description": "package.json launches the server via an unpinned '-y @modelcontextprotocol/server-redis' (latest). Unpinned resolution means the audited build can differ from the deployed one. Informational — pin the version for reproducible scans.", "scanner": "manifest_security", "location": "package.json (dependencies)", "evidence": "\"@modelcontextprotocol/server-redis\": \"latest\"", "tool_name": null, "tags": ["unpinned-dependency"], "phase": "static", "server": "redis", "session_id": "ses-894ebdc2" },
+    { "finding_id": "fnd-e90295ad-a172-4ca9-9910-8c059810186d", "risk_type": "R6", "severity": "HIGH", "confidence": 0.9, "title": "Server crashed during sequence 'fuzz_input_validation'", "description": "The MCP server process terminated unexpectedly while running test sequence 'fuzz_input_validation'. This indicates fragile error handling that could be exploited for DoS.", "related_events": ["evt-d0ee6dba-7ac9-4f80-ac29-15cd3db9124c"], "tool_name": null, "reproduction": "Run sequence 'fuzz_input_validation' and observe server process", "detected_at": "2026-05-24T17:38:14.708314Z", "phase": "dynamic", "scanner": "r6_stability", "server": "redis", "session_id": "ses-894ebdc2" },
+    { "finding_id": "fnd-bd7300f3-d1d1-49d1-844e-23acc32e4e0a", "risk_type": "R6", "severity": "LOW", "confidence": 0.5, "title": "Sequence timeout: 'init_enumerate'", "description": "Test sequence 'init_enumerate' did not complete within its timeout. This can indicate a server hang, slow outbound calls (retrieval / API-wrapping tools), or an undersized scan budget. Per-tool client_timeout findings, when present, localise the cause.", "related_events": ["evt-cd02095f-b58f-42c5-9bf9-892f9ef2852f", "evt-377dc318-85b3-4111-b7ea-e63b6a56d83b"], "tool_name": null, "reproduction": "Run sequence 'init_enumerate' with its specific inputs", "detected_at": "2026-05-24T17:38:14.708564Z", "phase": "dynamic", "scanner": "r6_stability", "server": "redis", "session_id": "ses-894ebdc2" },
+    { "finding_id": "fnd-72a4a715-25a2-410f-9b7a-e86b230b9450", "risk_type": "R6", "severity": "LOW", "confidence": 0.5, "title": "Sequence timeout: 'fuzz_input_validation'", "description": "Test sequence 'fuzz_input_validation' did not complete within its timeout. This can indicate a server hang, slow outbound calls (retrieval / API-wrapping tools), or an undersized scan budget. Per-tool client_timeout findings, when present, localise the cause.", "related_events": ["evt-322a9490-bbb3-419f-bab9-ba38bc2820ae", "evt-92c0fe1c-c106-4471-ac88-d8bd1196aa4b"], "tool_name": null, "reproduction": "Run sequence 'fuzz_input_validation' with its specific inputs", "detected_at": "2026-05-24T17:38:14.709753Z", "phase": "dynamic", "scanner": "r6_stability", "server": "redis", "session_id": "ses-894ebdc2" },
+    { "finding_id": "pp-r2-eval", "risk_type": "R2", "severity": "CRITICAL", "confidence": 0.85, "title": "Dynamic eval of tool-controlled expression in 'evaluate'", "description": "The 'evaluate' tool passes its 'script' argument into page.evaluate(), which runs as code in the browser context. With no allowlist or sandboxing this is arbitrary code execution reachable from tool input.", "scanner": "code_patterns", "location": "tool:evaluate.script", "evidence": "page.evaluate(args.script)", "tool_name": "evaluate", "tags": ["dynamic-eval", "tool-input-taint"], "phase": "dynamic", "server": "puppeteer", "session_id": "ses-7af31c02" },
+    { "finding_id": "pp-r1-screenshot", "risk_type": "R1", "severity": "HIGH", "confidence": 0.7, "title": "Navigation tool can reach internal network addresses", "description": "The 'navigate' tool accepts any URL with no host allowlist, so an agent can point the headless browser at 169.254.169.254 or internal services — an SSRF / data-exposure path (R1).", "scanner": "schema_audit", "location": "tool:navigate.url", "evidence": "{ \"type\": \"string\", \"format\": \"uri\" }", "tool_name": "navigate", "tags": ["ssrf", "broad-scope"], "phase": "static", "server": "puppeteer", "session_id": "ses-7af31c02" },
+    { "finding_id": "pp-r5-path", "risk_type": "R5", "severity": "MEDIUM", "confidence": 0.6, "title": "Screenshot path written without normalisation", "description": "The 'screenshot' tool writes to a caller-supplied path via fs.writeFileSync without path.normalize/resolve containment — a path-traversal write (R5).", "scanner": "code_patterns", "location": "tool:screenshot.path", "evidence": "fs.writeFileSync(args.path, buf)", "tool_name": "screenshot", "tags": ["path-traversal"], "phase": "static", "server": "puppeteer", "session_id": "ses-7af31c02" },
+    { "finding_id": "gh-r5-search", "risk_type": "R5", "severity": "MEDIUM", "confidence": 0.4, "title": "Unconstrained query string on tool 'search_issues'", "description": "Parameter 'q' accepts an arbitrary string with no maxLength. Forwarded directly to the GitHub search API — a weak input-validation signal worth bounding.", "scanner": "schema_audit", "location": "tool:search_issues.q", "evidence": "{ \"type\": \"string\" }  // no maxLength", "tool_name": "search_issues", "tags": ["unconstrained-string"], "phase": "static", "server": "github", "session_id": "ses-0c4d77a1" },
+    { "finding_id": "gh-r1-token", "risk_type": "R1", "severity": "LOW", "confidence": 0.3, "title": "Reads GITHUB_TOKEN from environment", "description": "Server reads a secret-shaped environment variable (GITHUB_TOKEN). Legitimate for this server, flagged INFO/low so exfiltration scanners can correlate (R1).", "scanner": "code_patterns", "location": "process.env.GITHUB_TOKEN", "evidence": "process.env.GITHUB_TOKEN", "tool_name": null, "tags": ["secret-env"], "phase": "static", "server": "github", "session_id": "ses-0c4d77a1" },
+    { "finding_id": "wx-r1-key", "risk_type": "R1", "severity": "MEDIUM", "confidence": 0.45, "title": "API key passed on the command line", "description": "weather-mcp is launched with '--api-key env:WEATHER_KEY'. Passing secrets as CLI args exposes them in the process table to any local user (R1).", "scanner": "manifest_security", "location": "argv --api-key", "evidence": "uvx weather-mcp --api-key env:WEATHER_KEY", "tool_name": null, "tags": ["secret-exposure"], "phase": "static", "server": "weather-api", "session_id": "ses-5ab7f6f4" },
+    { "finding_id": "wx-r6-timeout", "risk_type": "R6", "severity": "MEDIUM", "confidence": 0.5, "title": "Outbound HTTP request without a timeout", "description": "requests.get() to the upstream weather API has no timeout. A hung upstream blocks the server indefinitely — a stability/availability risk (R6).", "scanner": "code_patterns", "location": "client.py:fetch", "evidence": "requests.get(url)  # no timeout", "tool_name": "forecast", "tags": ["no-timeout"], "phase": "static", "server": "weather-api", "session_id": "ses-5ab7f6f4" },
+    { "finding_id": "fs-r5-read", "risk_type": "R5", "severity": "LOW", "confidence": 0.35, "title": "Read path joined without containment check", "description": "The 'read_file' tool joins the requested path under the root but the resolved path is not re-checked against the root prefix — a low-confidence traversal signal.", "scanner": "schema_audit", "location": "tool:read_file.path", "evidence": null, "tool_name": "read_file", "tags": ["path-traversal"], "phase": "static", "server": "filesystem", "session_id": "ses-22b9e15d" }
+  ]
+}

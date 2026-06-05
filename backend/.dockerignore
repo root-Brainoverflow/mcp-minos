@@ -1,0 +1,15 @@
+# Build context trimming for the backend image.
+.venv
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.pyright
+.DS_Store
+# Not needed by the read-API image:
+docker/
+poc/
+docs/
+tests/
+*.log

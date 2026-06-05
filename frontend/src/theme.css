@@ -1,0 +1,133 @@
+/* theme.css — design tokens + global styles for the mcp-minos frontend.
+   Ported verbatim from the design's <style> block (MCP Minos.html). */
+
+:root {
+  /* ── Surfaces (warm-neutral light) ── */
+  --bg: #f6f6f5;
+  --surface: #ffffff;
+  --surface-2: #fbfbfa;
+  --surface-inset: #f3f3f1;
+  --border: #e9e9e6;
+  --border-strong: #dcdcd8;
+  --border-faint: #f0f0ee;
+
+  /* ── Text ── */
+  --text: #1a1a18;
+  --text-2: #57564f;
+  --text-3: #8a897f;
+  --text-faint: #b4b3a9;
+
+  /* ── Signal palette (verdict / severity), shared chroma ── */
+  --red: #c8392b;        --red-bg: #fbece9;     --red-border: #f1c9c2;
+  --orange: #c2611a;     --orange-bg: #fbefe3;  --orange-border: #f0d4b4;
+  --amber: #b07d12;      --amber-bg: #faf2da;   --amber-border: #ecdca8;
+  --blue: #2f6bb0;       --blue-bg: #eaf1f9;    --blue-border: #c4d8ee;
+  --green: #2e7d4f;      --green-bg: #e8f3ec;   --green-border: #bfdec9;
+  --slate: #6b6a62;      --slate-bg: #f0f0ed;   --slate-border: #dededa;
+
+  --accent: #1a1a18;     /* default ink accent */
+
+  /* ── Geometry ── */
+  --r-sm: 6px;
+  --r-md: 9px;
+  --r-lg: 13px;
+  --r-xl: 18px;
+  --shadow-sm: 0 1px 2px rgba(28,28,24,0.04), 0 1px 1px rgba(28,28,24,0.03);
+  --shadow-md: 0 2px 4px rgba(28,28,24,0.05), 0 6px 16px rgba(28,28,24,0.06);
+  --shadow-lg: 0 8px 30px rgba(28,28,24,0.10), 0 2px 6px rgba(28,28,24,0.05);
+
+  --font: "Geist", system-ui, -apple-system, sans-serif;
+  --mono: "Geist Mono", ui-monospace, SFMono-Regular, monospace;
+
+  --maxw: 1080px;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "cv01", "ss01";
+}
+#root { min-height: 100vh; }
+
+/* density */
+[data-density="compact"] { --row-pad: 9px; --gap: 10px; }
+[data-density="regular"] { --row-pad: 13px; --gap: 14px; }
+[data-density="comfy"]   { --row-pad: 17px; --gap: 18px; }
+
+button { font-family: inherit; cursor: pointer; }
+::selection { background: rgba(176,125,18,0.18); }
+
+/* Scrollbars */
+.scroll::-webkit-scrollbar { width: 10px; height: 10px; }
+.scroll::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 10px; border: 3px solid var(--surface); }
+.scroll::-webkit-scrollbar-track { background: transparent; }
+
+/* Mono numerals */
+.tnum { font-variant-numeric: tabular-nums; }
+
+/* Transform-only entrances — opacity is never animated, so content is
+   always visible even if the keyframe no-ops or a renderer clones the DOM. */
+@keyframes mn-fade-up { from { transform: translateY(9px); } to { transform: none; } }
+@keyframes mn-fade { from { transform: translateY(4px); } to { transform: none; } }
+@keyframes mn-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+@keyframes mn-spin { to { transform: rotate(360deg); } }
+@keyframes mn-bar { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+@keyframes mn-sweep { 0% { left: -40%; } 100% { left: 100%; } }
+@keyframes mn-blink { 0%,49% { opacity: 1; } 50%,100% { opacity: 0; } }
+
+/* Base state is fully VISIBLE; the entrance only nudges transform. */
+.fade-up { opacity: 1; animation: mn-fade-up 0.5s cubic-bezier(.2,.7,.2,1); }
+.fade { opacity: 1; animation: mn-fade 0.35s ease; }
+@media (prefers-reduced-motion: reduce) {
+  .fade-up, .fade { animation: none; }
+}
+
+/* focus ring */
+.focusable:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+
+/* dashboard responsive grids */
+@media (max-width: 900px) {
+  .kpi-row { grid-template-columns: repeat(2, 1fr) !important; }
+  .two-col { grid-template-columns: 1fr !important; }
+  .mcp-grid { grid-template-columns: repeat(2, 1fr) !important; }
+  .login-split { grid-template-columns: 1fr !important; }
+  .login-split > div:first-child { display: none !important; }
+  .login-mobile-logo { display: block !important; }
+}
+@media (max-width: 540px) {
+  .kpi-row { grid-template-columns: 1fr !important; }
+  .mcp-grid { grid-template-columns: 1fr !important; }
+}
+
+/* Korean: break lines at word boundaries (어절), not between syllables.
+   `break-word` still breaks an over-long token so nothing overflows. */
+html[lang="ko"] { word-break: keep-all; overflow-wrap: break-word; }
+
+/* ── Print → PDF (Export report) ──────────────────────────────────────────────
+   Hide the app chrome (sidebar, topbar, buttons, filters) and lay out only the
+   report at the top of the page. `printing` state in ResultsScreen expands every
+   finding + the event log so the PDF is complete. */
+@media print {
+  @page { margin: 14mm; }
+  html, body { background: #fff !important; }
+  /* Hide everything, then reveal only the report subtree. */
+  body * { visibility: hidden; }
+  #report-print-root, #report-print-root * { visibility: visible; }
+  #report-print-root {
+    position: absolute; left: 0; top: 0;
+    width: 100%; max-width: 100% !important; margin: 0 !important; padding: 0 !important;
+  }
+  /* Interactive-only bits never belong in the PDF. */
+  .no-print, .no-print * { display: none !important; }
+  /* Keep cards whole across page breaks; flatten shadows for print. */
+  .mn-card { break-inside: avoid; box-shadow: none !important; }
+  /* The event log is a scroll box on screen — let it flow fully on paper. */
+  .mn-eventlog { max-height: none !important; overflow: visible !important; }
+  /* Preserve verdict / severity / score colors. */
+  * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+}

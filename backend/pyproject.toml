@@ -16,6 +16,8 @@ dependencies = [
     "pydantic>=2.0",
     "rich>=13.0",
     "psutil>=5.9",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
 ]
 
 [project.optional-dependencies]
@@ -28,9 +30,10 @@ dev = [
 ]
 
 [project.scripts]
-# `minos` — currently the dynamic-analysis CLI (click group: discover / scan / analyze).
-# Later steps extend this same command with static analysis + unified reporting.
+# `minos` — the dynamic-analysis CLI (click group: discover / static / dynamic / scan / analyze).
 minos = "mcp_security_analyzer.dynamic.cli:main"
+# `minos-api` — start the FastAPI read-API (uvicorn) the web frontend talks to.
+minos-api = "mcp_security_analyzer.api.main:run"
 
 [build-system]
 requires = ["hatchling"]
