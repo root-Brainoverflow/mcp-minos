@@ -418,6 +418,10 @@ def read_session_detail(session_id: str) -> dict[str, Any] | None:
             "generated": generated,
             "duration_sec": meta.get("duration_sec", 0),
             "verdict": verdict,
+            # New (Impact × Evidence) model detail: decision/reasons/warnings/
+            # coverage/error. Present for scans run after the verdict-model wiring;
+            # None for older sessions (UI falls back to the scalar verdict).
+            "verdict_detail": meta.get("verdict_detail"),
             "overall_score": score,
             "tools_tested": meta.get("tools_tested", 0),
             "total_events": meta.get("total_events", len(events)),
@@ -450,7 +454,7 @@ def discovered_servers() -> list[dict[str, Any]]:
         found = []
 
     if not found:
-        return _sample()["DISCOVERED_SERVERS"]
+        return []  # real discovery only — no demo servers
 
     sessions = get_sessions()  # computed once, shared across all servers
     servers = []
@@ -675,27 +679,20 @@ def _finding_for_ui(f: dict[str, Any], server: str, session_id: str) -> dict[str
 
 
 def get_sessions() -> list[dict[str, Any]]:
-    recs = _real_records()
-    if not recs:
-        return _sample()["SCAN_SESSIONS"]
-    return [_session_summary(r) for r in recs]
+    # Real scans only — no demo fallback. Empty results/ → empty list.
+    return [_session_summary(r) for r in _real_records()]
 
 
 def get_recent_sessions() -> list[dict[str, Any]]:
-    """Latest session per server (newest first)."""
-    recs = _real_records()
-    if not recs:
-        return _sample()["RECENT_SESSIONS"]
+    """Latest session per server (newest first). Real scans only."""
     seen: dict[str, dict[str, Any]] = {}
-    for r in recs:  # already newest-first
+    for r in _real_records():  # already newest-first
         seen.setdefault(r["server"], r)
     return [_session_summary(r) for r in seen.values()]
 
 
 def get_findings() -> list[dict[str, Any]]:
-    recs = _real_records()
-    if not recs:
-        return _sample()["FLEET_FINDINGS"]
+    recs = _real_records()  # real scans only — no demo fallback
     out: list[dict[str, Any]] = []
     for r in recs:
         for f in r["data"].get("findings") or []:
@@ -725,8 +722,15 @@ def _findings_over_time(sessions: list[dict[str, Any]], weeks: int = 8) -> list[
 
 
 def get_overview(servers: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    """Fleet overview aggregated from real sessions; sample fallback if none."""
-    ov = dict(_sample()["OVERVIEW"])  # base for fields we can't compute
+    """Fleet overview aggregated from real sessions only (no demo fallback)."""
+    # Zeroed base — everything reflects real discovery/scans or stays empty.
+    ov: dict[str, Any] = {
+        "servers_discovered": 0, "sources": {}, "clients": 0,
+        "scans_run": 0, "scans_this_week": 0, "open_findings": 0, "critical_high": 0,
+        "by_severity": {k: 0 for k in _SEVERITY_ORDER}, "verdict_mix": {}, "at_risk": 0,
+        "risk_scores": {f"R{i}": 0.0 for i in range(1, 7)},
+        "static_findings": 0, "dynamic_findings": 0, "findings_over_time": [0] * 8,
+    }
     if servers is None:
         servers = discovered_servers()
     if servers:
@@ -739,8 +743,8 @@ def get_overview(servers: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         ov["clients"] = len(src_counts)
 
     sessions = get_sessions()
-    if not _real_records():
-        return ov  # no real scans — keep curated aggregate numbers
+    if not sessions:
+        return ov  # discovery only, no scans yet — zeros
 
     sev_total: dict[str, int] = {}
     vmix = {"APPROVE": 0, "CONDITIONAL": 0, "REJECT": 0, "UNSCANNED": 0}
@@ -822,8 +826,11 @@ def get_bootstrap() -> dict[str, Any]:
 
     recs = _real_records()
     if not recs:
-        # No completed scans on disk — keep the curated demo dataset as-is, but
-        # still reflect real discovery in the overview server counts.
+        # No completed scans on disk — show empty (real data only, no demo),
+        # but still reflect real discovery in the overview server counts.
+        data["SCAN_SESSIONS"] = []
+        data["RECENT_SESSIONS"] = []
+        data["FLEET_FINDINGS"] = []
         data["OVERVIEW"] = get_overview(servers)
         return data
 
@@ -922,6 +929,35 @@ def _patch_session_name(session_dir: Path, name: str) -> None:
         log.warning("api.scan.patch_name_failed", path=str(fp), error=str(exc))
 
 
+def _static_verdict(findings_raw: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
+    """Compute a static-only scan's verdict with the (Impact × Evidence) model.
+
+    Static analysis always has coverage, so the outcome is REJECT or PASS (never
+    ERROR). Reuses ``verdict.evaluate`` by wrapping each finding dict in a small
+    duck-typed shim (the evaluator reads ``kind``/``risk_type`` via getattr).
+    """
+    from types import SimpleNamespace
+
+    from mcp_security_analyzer.dynamic.models import RiskType
+    from mcp_security_analyzer.dynamic.output import verdict as verdict_mod
+
+    shims = []
+    for f in findings_raw:
+        try:
+            rt = RiskType(f.get("risk_type"))
+        except ValueError:
+            rt = None
+        shims.append(SimpleNamespace(
+            kind=f.get("kind"),
+            risk_type=rt,
+            finding_id=f.get("finding_id"),
+            impact=None,
+            evidence=None,
+        ))
+    result = verdict_mod.evaluate(shims, coverage_ok=True)
+    return result.decision.value, result.to_dict()
+
+
 def _save_static_session(
     stdout_json: str, command: str | None, args: list[str], name: str | None = None
 ) -> str | None:
@@ -973,9 +1009,10 @@ def _save_static_session(
         })
 
     overall = max(risk_scores.values()) if findings else 0.0
-    has_critical = by_sev.get("CRITICAL", 0) > 0
-    has_high = by_sev.get("HIGH", 0) > 0
-    verdict = "REJECT" if has_critical else "CONDITIONAL" if has_high or findings else "APPROVE"
+    # Verdict via the (Impact × Evidence) model (docs/severity-verdict-model.md).
+    # Static analysis always "covers" the source, so coverage_ok=True → decision
+    # is REJECT (a strong-evidence C/I or takeover finding) or PASS, never ERROR.
+    verdict, verdict_detail = _static_verdict(findings_raw)
 
     server_entry: dict[str, Any] = {"command": command or "", "args": args}
     if name:
@@ -992,6 +1029,7 @@ def _save_static_session(
             "total_events": 0,
             "overall_score": round(overall, 4),
             "verdict": verdict,
+            "verdict_detail": verdict_detail,
             "by_severity": by_sev,
         },
     }

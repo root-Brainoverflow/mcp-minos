@@ -121,6 +121,19 @@ REASON_INTEGRITY = "integrity-manipulation"
 WARN_AVAILABILITY = "availability/stability"
 WARN_STATIC_SUSPICION = "static-only-suspicion"
 WARN_LIMITED_LEAK = "limited-info-leak"
+WARN_MEMORY_CORRUPTION = "potential-memory-corruption"
+
+# §8.3 memory-safety crash signals (negative returncode == -signum). A crash via
+# SIGSEGV/SIGABRT/SIGBUS may be an exploitable-crash / RCE precursor, so it earns
+# a warning flag for human review (still PASS — precise detection is v2).
+# Caveat: on the Docker path the returncode is the container's, not the inner
+# server's signal, so this mainly catches the no-sandbox (local) path.
+_MEM_CORRUPTION_SIGNALS = frozenset({6, 7, 10, 11})  # SIGABRT, SIGBUS(linux/mac), SIGSEGV
+
+
+def is_memory_corruption_signal(returncode: int | None) -> bool:
+    """True iff *returncode* denotes a memory-safety crash signal (§8.3)."""
+    return returncode is not None and returncode < 0 and (-returncode) in _MEM_CORRUPTION_SIGNALS
 
 
 @dataclass
@@ -182,6 +195,7 @@ def evaluate(
     *,
     coverage_ok: bool = True,
     error_message: str | None = None,
+    memory_corruption_crash: bool = False,
 ) -> VerdictResult:
     """Compute the server verdict from a finding pool (static+dynamic union).
 
@@ -212,6 +226,10 @@ def evaluate(
             cat = _warning_category(impact, evidence)
             warnings[cat] = warnings.get(cat, 0) + 1
             residual.append(severity_of(impact, evidence))
+
+    # §8.3 — a memory-safety crash signal earns a review flag (still non-blocking).
+    if memory_corruption_crash:
+        warnings[WARN_MEMORY_CORRUPTION] = warnings.get(WARN_MEMORY_CORRUPTION, 0) + 1
 
     if reasons:
         decision = Decision.REJECT

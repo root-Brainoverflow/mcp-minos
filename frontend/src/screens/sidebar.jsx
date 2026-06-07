@@ -533,6 +533,12 @@ export function ResultsListScreen({ onOpen }) {
   const [verdict, setVerdict] = useState("all");
   const filtered = verdict === "all" ? sessions : sessions.filter((s) => s.verdict === verdict);
   const counts = sessions.reduce((a, s) => { a[s.verdict] = (a[s.verdict] || 0) + 1; return a; }, {});
+  // Show a chip per verdict actually present (new PASS/REJECT/ERROR + legacy).
+  const VERDICT_ORDER = ["PASS", "APPROVE", "CONDITIONAL", "REJECT", "ERROR", "UNSCANNED"];
+  const verdictChips = [
+    ...VERDICT_ORDER.filter((v) => counts[v]),
+    ...Object.keys(counts).filter((v) => !VERDICT_ORDER.includes(v)),
+  ];
   const initial = loading && !data;
 
   return (
@@ -542,7 +548,7 @@ export function ResultsListScreen({ onOpen }) {
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           <RuleChip active={verdict === "all"} onClick={() => setVerdict("all")}>{t("results.all")} <span style={{ opacity: 0.6 }}>{sessions.length}</span></RuleChip>
-          {["APPROVE", "CONDITIONAL", "REJECT"].map((v) => (
+          {verdictChips.map((v) => (
             <RuleChip key={v} active={verdict === v} onClick={() => setVerdict(v)} mono>{v} <span style={{ opacity: 0.6 }}>{counts[v] || 0}</span></RuleChip>
           ))}
         </div>

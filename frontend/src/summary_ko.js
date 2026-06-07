@@ -7,8 +7,8 @@
 import { MINOS_DATA } from "./data.js";
 
 const VERDICT = {
-  REJECT: "배포 부적합(REJECT)", CONDITIONAL: "조건부 통과(CONDITIONAL)",
-  APPROVE: "통과(APPROVE)", UNSCANNED: "미스캔",
+  REJECT: "배포 부적합(REJECT)", PASS: "통과(PASS)", ERROR: "검사 불가(ERROR)",
+  CONDITIONAL: "조건부 통과(CONDITIONAL)", APPROVE: "통과(APPROVE)", UNSCANNED: "미스캔",
 };
 
 // What the code/finding actually does — noun-modifier phrase ("…하는").
@@ -97,7 +97,7 @@ function clusterSentence(items) {
   return `동적 분석에서 ${rn} 관련 발견이 ${n}건 확인됐습니다.`;
 }
 
-export function koSummary(server, verdict, score, findings, scores, toolsTested) {
+export function koSummary(server, verdict, score, findings, scores, toolsTested, detail) {
   const n = findings.length;
   const fixed = (score || 0).toFixed(2);
   const V = VERDICT[verdict] || "스캔 완료";
@@ -105,6 +105,13 @@ export function koSummary(server, verdict, score, findings, scores, toolsTested)
   const dynamics = findings.filter((f) => !isStatic(f));
   const phaseWord = statics.length && dynamics.length ? "정적·동적 분석"
     : statics.length ? "정적 분석" : "동적 분석";
+
+  // ERROR(검사 불가): 서버를 못 띄웠거나 도구가 0개 → 위험 판정 자체를 내리지 않음.
+  if (verdict === "ERROR") {
+    const why = (detail && detail.error_message)
+      || "서버가 부팅에 실패했거나 노출된 도구가 없어 동적 검사를 완료하지 못했습니다.";
+    return `${server} 서버는 동적 검사를 완료하지 못해 판정을 내릴 수 없습니다(검사 불가). ${why} "침해 증거가 없는 것"과 "안전한 것"은 다르므로 통과로 처리하지 않습니다 — 원인을 해결한 뒤 다시 스캔하세요.`;
+  }
 
   if (n === 0) {
     return `${server} 서버는 ${phaseWord} 결과 ${V} 판정을 받았습니다(위험 점수 ${fixed} / 1.00). 여섯 가지 위험 유형(R1–R6) 어디에서도 걸린 항목이 없어, 현재로서는 배포를 막을 신호가 없습니다. 버전을 올릴 때마다 다시 스캔하기를 권합니다.`;
@@ -153,7 +160,7 @@ export function koSummary(server, verdict, score, findings, scores, toolsTested)
   const act = ACTION_BY_RISK[worst] || "표시된 지점을 점검";
   let s4;
   if (verdict === "REJECT") s4 = `배포 전에 ${act}한 뒤 다시 스캔해 깨끗한지 확인하세요.`;
-  else if (verdict === "APPROVE") s4 = "배포를 막을 문제는 없으니, 버전을 올릴 때마다 계속 스캔하세요.";
+  else if (verdict === "APPROVE" || verdict === "PASS") s4 = "배포를 막을 문제는 없으니, 버전을 올릴 때마다 계속 스캔하세요.";
   else if (allLow) s4 = `다만 ${act}하는 것은 권합니다.`;
   else s4 = `${act}한 뒤 배포하고, 해결되면 다시 스캔하세요.`;
 

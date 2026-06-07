@@ -36,13 +36,25 @@ class Exporter:
         """Write ``findings.json`` into *output_dir* and return its path."""
         output_dir.mkdir(parents=True, exist_ok=True)
         path = output_dir / "findings.json"
+        # `output.metadata["verdict"]` carries the new (Impact × Evidence) model's
+        # full result (decision REJECT/PASS/ERROR + reasons/warnings/coverage).
+        # Expose its decision as the headline `verdict` and keep the full object
+        # under `verdict_detail`; the legacy per-risk score stays for the risk
+        # bars but no longer overwrites the verdict (docs/severity-verdict-model.md).
+        new_verdict = output.metadata.get("verdict")
+        decision = (
+            new_verdict.get("decision") if isinstance(new_verdict, dict)
+            else (new_verdict or scores.verdict)
+        )
         enriched = output.model_copy(update={
             "dynamic_risk_scores": scores.per_risk,
             "metadata": {
                 **output.metadata,
                 "overall_score": scores.overall,
-                "verdict": scores.verdict,
                 "by_severity": scores.by_severity,
+                "verdict": decision,
+                "verdict_detail": new_verdict if isinstance(new_verdict, dict) else None,
+                "legacy_verdict": scores.verdict,
             },
         })
         path.write_text(enriched.model_dump_json(indent=2))

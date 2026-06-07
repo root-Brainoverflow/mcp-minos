@@ -82,11 +82,18 @@ const _RISK_FIX = {
   R5: "validate and bound every tool input",
   R6: "harden the crashing handlers or run behind a restart supervisor",
 };
-const _VERDICT_PHRASE = { REJECT: "was rejected for deployment", CONDITIONAL: "passed conditionally", APPROVE: "cleared the pre-deploy gate", UNSCANNED: "has not been fully scanned" };
+const _VERDICT_PHRASE = { REJECT: "was rejected for deployment", PASS: "passed the scan", ERROR: "could not be tested", CONDITIONAL: "passed conditionally", APPROVE: "cleared the pre-deploy gate", UNSCANNED: "has not been fully scanned" };
 
-function composeSummary(server, verdict, score, findings, scores, toolsTested) {
+function composeSummary(server, verdict, score, findings, scores, toolsTested, detail) {
   if (getLang() === "ko") {
-    return koSummary(server, verdict, score, findings, scores, toolsTested);
+    return koSummary(server, verdict, score, findings, scores, toolsTested, detail);
+  }
+
+  // ERROR (untestable): no risk verdict was reached — the scan couldn't run.
+  if (verdict === "ERROR") {
+    const why = (detail && detail.error_message)
+      || "The server failed to start or exposed no tools, so the dynamic scan couldn't complete.";
+    return `${server} could not be assessed — the scan didn't reach a verdict (untestable). ${why} "No evidence of compromise" is not "safe", so this isn't treated as a pass — fix the cause and re-scan.`;
   }
 
   const n = findings.length;
@@ -107,7 +114,7 @@ function composeSummary(server, verdict, score, findings, scores, toolsTested) {
     s2 = `It has ${n} ${topSev ? topSev.toLowerCase() + "-severity " : ""}finding${n > 1 ? "s" : ""} ${where}${reach}.`;
   }
   let s3;
-  if (n === 0 || verdict === "APPROVE") s3 = "No blocking issues — keep scanning on each version bump.";
+  if (n === 0 || verdict === "APPROVE" || verdict === "PASS") s3 = "No blocking issues — keep scanning on each version bump.";
   else if (verdict === "REJECT") s3 = `Do not deploy until you ${_RISK_FIX[worst] || "fix the flagged issues"} and the server re-scans clean.`;
   else s3 = `Ship only behind mitigations — ${_RISK_FIX[worst] || "address the flagged issues"} — then re-scan.`;
   return `${s1} ${s2} ${s3}`;
@@ -168,12 +175,13 @@ export function ResultsScreen({ heroStyle, onNewScan, session }) {
   const sess = detail.session;
   const reason = t(`reason.${sess.verdict}`);
   const events = detail.events || [];
-  const summary = composeSummary(detail.server, sess.verdict, sess.overall_score, findings, scores, sess.tools_tested);
+  const summary = composeSummary(detail.server, sess.verdict, sess.overall_score, findings, scores, sess.tools_tested, sess.verdict_detail);
 
   return (
     <div id="report-print-root" className="fade" style={{ maxWidth: "var(--maxw)", margin: "0 auto", padding: "0 28px 90px" }}>
       <ReportHeader onNewScan={onNewScan} onExport={exportPdf} sess={sess} server={detail.server} />
       {summary && <ReportSummary text={summary} verdict={sess.verdict} />}
+      <VerdictNotes detail={sess.verdict_detail} />
       <VerdictHero style={heroStyle} scores={scores} sevCount={sevCount} total={findings.length} sess={sess} reason={reason} />
       <RiskMatrix scores={scores} riskCount={riskCount} />
       <FindingsSection findings={findings} riskCount={riskCount} forceOpen={printing} />
@@ -222,6 +230,37 @@ function ReportSummary({ text, verdict }) {
     }}>
       <span style={{ fontFamily: "var(--mono)", fontSize: 10.5, fontWeight: 700, letterSpacing: "0.08em", color: "var(--text-faint)", paddingTop: 3, flex: "none" }}>{t("report.tldr")}</span>
       <p style={{ margin: 0, fontSize: 14, lineHeight: 1.62, color: "var(--text-2)" }}>{text}</p>
+    </div>
+  );
+}
+
+// Blocked-by reasons (REJECT) + non-blocking warnings (incl. the §8.3
+// potential-memory-corruption flag) from the new verdict model's detail.
+function VerdictNotes({ detail }) {
+  if (!detail) return null;
+  const reasonCats = [...new Set((detail.reasons || []).map((r) => r.reason))];
+  const warnings = detail.warnings || {};
+  const warnKeys = Object.keys(warnings).filter((k) => warnings[k] > 0);
+  if (reasonCats.length === 0 && warnKeys.length === 0) return null;
+
+  const red = SEV_COLOR.CRITICAL, amber = SEV_COLOR.MEDIUM;
+  const chip = (key, text, c) => (
+    <span key={key} style={{
+      display: "inline-flex", alignItems: "center", gap: 6, padding: "3px 10px", borderRadius: 999,
+      fontSize: 12, fontWeight: 600, color: c.fg, background: c.bg, border: `1px solid ${c.bd}`,
+    }}>{text}</span>
+  );
+  const group = (label, children) => (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+      <span style={{ fontSize: 11, fontFamily: "var(--mono)", color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: "0.04em" }}>{label}</span>
+      {children}
+    </div>
+  );
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 18, alignItems: "center", margin: "0 0 18px" }}>
+      {reasonCats.length > 0 && group(t("report.blockedBy"), reasonCats.map((rc) => chip(rc, t(`vlabel.${rc}`), red)))}
+      {warnKeys.length > 0 && group(t("report.warnings"), warnKeys.map((k) =>
+        chip(k, `${t(`vlabel.${k}`)} ×${warnings[k]}`, k === "potential-memory-corruption" ? red : amber)))}
     </div>
   );
 }

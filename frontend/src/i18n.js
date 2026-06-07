@@ -224,7 +224,19 @@ const STRINGS = {
     "reason.REJECT": "Critical findings reachable from tool input. Do not deploy until the flagged sinks are fixed and the server re-scans clean.",
     "reason.CONDITIONAL": "No critical issues, but medium-severity signals remain. Ship only behind the noted mitigations and re-scan once resolved.",
     "reason.APPROVE": "No blocking findings. The server cleared the pre-deploy gate; keep scanning on each version bump.",
+    "reason.PASS": "No blocking findings — the scan completed and the server cleared the checks. Keep scanning on each version bump.",
+    "reason.ERROR": "The scan couldn't be completed (the server failed to start or exposed no tools), so no verdict was reached. Check the diagnostics and re-run.",
     "reason.UNSCANNED": "This server has not been fully scanned yet.",
+    "report.blockedBy": "Blocked by",
+    "report.warnings": "Warnings",
+    "vlabel.known-malware": "Known malware",
+    "vlabel.machine-takeover": "Machine takeover",
+    "vlabel.data-access": "Data access",
+    "vlabel.integrity-manipulation": "Integrity manipulation",
+    "vlabel.availability/stability": "Availability / stability",
+    "vlabel.static-only-suspicion": "Static-only suspicion",
+    "vlabel.limited-info-leak": "Limited info leak",
+    "vlabel.potential-memory-corruption": "Potential memory corruption",
 
     // findings screen
     "findings.eyebrow": "FINDINGS",
@@ -370,7 +382,7 @@ const STRINGS = {
 
     // dashboard
     "dash.eyebrow": "개요",
-    "dash.sub": "이 머신에 설치된 MCP 서버를 배포하기 전에 점검합니다. 소스를 정적 분석하고 격리된 샌드박스에서 직접 실행해 데이터 접근·코드 실행·안정성 등 R1–R6 위험을 찾아내고, 배포 가능 여부를 점수와 함께 알려줍니다.",
+    "dash.sub": "이 머신에 설치된 MCP 서버를 배포하기 전에 점검합니다. 소스를 정적 분석하고 격리된 샌드박스에서 직접 실행해 데이터 접근 · 코드 실행 · 안정성 등 R1–R6 위험을 찾아내고, 배포 가능 여부를 점수와 함께 알려줍니다.",
     "dash.kpi.servers": "MCP 서버",
     "dash.kpi.serversSub": "클라이언트 {n}곳",
     "dash.kpi.scans": "실행한 스캔",
@@ -524,7 +536,19 @@ const STRINGS = {
     "reason.REJECT": "도구 입력만으로 도달할 수 있는 심각한 문제가 있습니다. 표시된 취약 지점을 수정하고 재스캔이 깨끗해지기 전에는 배포하지 마세요.",
     "reason.CONDITIONAL": "심각한 문제는 없지만 중간 수준의 신호가 남아 있습니다. 안내된 완화책을 적용한 상태에서만 배포하고, 해결 후 다시 스캔하세요.",
     "reason.APPROVE": "배포를 막을 문제가 없습니다. 배포 전 점검을 통과했습니다. 버전을 올릴 때마다 계속 스캔하세요.",
+    "reason.PASS": "배포를 막을 문제가 없습니다. 스캔이 정상 완료되었고 점검을 통과했습니다. 버전을 올릴 때마다 계속 스캔하세요.",
+    "reason.ERROR": "스캔을 완료하지 못해(서버가 부팅에 실패했거나 노출된 도구가 없음) 판정을 내리지 못했습니다. 진단 메시지를 확인하고 다시 실행하세요.",
     "reason.UNSCANNED": "아직 전체 스캔이 끝나지 않은 서버입니다.",
+    "report.blockedBy": "차단 사유",
+    "report.warnings": "경고",
+    "vlabel.known-malware": "알려진 악성코드",
+    "vlabel.machine-takeover": "머신 장악",
+    "vlabel.data-access": "데이터 접근",
+    "vlabel.integrity-manipulation": "무결성 조작",
+    "vlabel.availability/stability": "가용성 / 안정성",
+    "vlabel.static-only-suspicion": "정적 의심",
+    "vlabel.limited-info-leak": "제한적 정보 노출",
+    "vlabel.potential-memory-corruption": "메모리 손상 의심",
 
     // findings screen
     "findings.eyebrow": "발견 사항",

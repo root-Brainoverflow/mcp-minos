@@ -29,7 +29,7 @@ export function DashboardScreen({ onDiscover, onOpenSession, onSelectServer }) {
       <div>
         <div style={{ fontFamily: "var(--mono)", fontSize: 11.5, fontWeight: 600, letterSpacing: "0.08em", color: "var(--text-3)", marginBottom: 12 }}>{t("dash.eyebrow")}</div>
         <h1 style={{ margin: 0, fontSize: 28, fontWeight: 700, letterSpacing: "-0.02em", lineHeight: 1.15 }}>MCP-Minos</h1>
-        <p style={{ margin: "10px 0 0", fontSize: 14.5, color: "var(--text-2)", lineHeight: 1.55, maxWidth: 560 }}>
+        <p style={{ margin: "10px 0 0", fontSize: 14.5, color: "var(--text-2)", lineHeight: 1.55, maxWidth: 730 }}>
           {t("dash.sub")}
         </p>
       </div>
@@ -246,7 +246,14 @@ function McpServerRow({ srv, last, onClick }) {
 
 // ── Verdict mix ──────────────────────────────────────────────────────────────
 function VerdictMix({ mix }) {
-  const order = ["APPROVE", "CONDITIONAL", "REJECT", "UNSCANNED"];
+  // Preferred display order; render only verdicts actually present so old
+  // (APPROVE/CONDITIONAL) and new (PASS/ERROR) sessions both show cleanly.
+  const PREFERRED = ["PASS", "APPROVE", "CONDITIONAL", "REJECT", "ERROR", "UNSCANNED"];
+  const present = Object.keys(mix).filter((v) => mix[v] > 0);
+  const order = [
+    ...PREFERRED.filter((v) => present.includes(v)),
+    ...present.filter((v) => !PREFERRED.includes(v)),
+  ];
   const total = Object.values(mix).reduce((a, b) => a + b, 0);
   return (
     <Card pad="16px 18px 18px">
@@ -273,6 +280,7 @@ function VerdictMix({ mix }) {
 }
 const VERDICT_COLOR_LOCAL = {
   REJECT: { fg: "var(--red)" }, CONDITIONAL: { fg: "var(--amber)" },
+  PASS: { fg: "var(--green)" }, ERROR: { fg: "var(--slate)" },
   APPROVE: { fg: "var(--green)" }, UNSCANNED: { fg: "var(--slate)" },
 };
 

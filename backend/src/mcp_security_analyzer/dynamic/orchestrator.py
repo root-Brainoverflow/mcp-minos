@@ -108,6 +108,7 @@ async def run_analysis(
     event_store = EventStore(output_dir)
     tools: list[ToolInfo] = []
     scan_completed = False
+    mem_corruption_crash = False
     started_at = time.monotonic()
 
     log.info("orchestrator.collection.start", session_id=session_id)
@@ -124,7 +125,7 @@ async def run_analysis(
     trusted_internal_ips: set[str] = set()
 
     try:
-        tools, scan_completed = await _collect(
+        tools, scan_completed, mem_corruption_crash = await _collect(
             config=config,
             session_id=session_id,
             event_store=event_store,
@@ -254,6 +255,7 @@ async def run_analysis(
     verdict_result = verdict_mod.evaluate(
         correlated,
         coverage_ok=coverage_ok,
+        memory_corruption_crash=mem_corruption_crash,
         error_message=(
             None if coverage_ok
             else (
@@ -315,10 +317,12 @@ async def _collect(
     variation_tag: str | None = None,
     trusted_internal_ips: set[str] | None = None,
     environment_snapshot: EnvironmentSnapshot | None = None,
-) -> tuple[list[ToolInfo], bool]:
+) -> tuple[list[ToolInfo], bool, bool]:
     """Run collection sequences inside a sandbox.
 
-    Returns ``(tools, scan_completed)``. ``scan_completed`` is True only when
+    Returns ``(tools, scan_completed, memory_corruption_crash)``. The last flag
+    is True when a crash exit code was a memory-safety signal (SIGSEGV/SIGABRT/
+    SIGBUS, §8.3). ``scan_completed`` is True only when
     every sequence ran to the end; it is False when the run was cut short by an
     unrecovered crash (``_MAX_CRASH_RESTARTS`` exceeded), a global timeout, or a
     server stdout EOF — i.e. coverage is partial, so the verdict layer (§8.4)
@@ -343,6 +347,7 @@ async def _collect(
 
         remaining = list(sequences)
         crash_count = 0
+        crash_signals: list[int] = []  # process exit codes from crashes (§8.3)
         completed = False  # True only when the sequence loop finishes normally
         # Payload categories that have crashed the server in a prior
         # iteration. Re-applied to every fuzzing sequence before each
@@ -470,6 +475,8 @@ async def _collect(
                     if not sandbox.is_running:
                         proc = sandbox._proc  # noqa: SLF001
                         rc = proc.returncode if proc else None
+                        if rc is not None and rc < 0:
+                            crash_signals.append(rc)  # signal kill → -signum (§8.3)
                         log.warning("orchestrator.server_exited_early", rc=rc)
                     await _stop_monitors(monitors, honeypot)
                     await interceptor.close()
@@ -534,7 +541,9 @@ async def _collect(
         if honeypot is not None:
             honeypot.cleanup()
 
-    return tools, completed
+    from mcp_security_analyzer.dynamic.output.verdict import is_memory_corruption_signal
+    mem_corruption = any(is_memory_corruption_signal(rc) for rc in crash_signals)
+    return tools, completed, mem_corruption
 
 
 async def _detect_missing_prerequisite(

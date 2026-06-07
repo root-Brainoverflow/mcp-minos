@@ -13,12 +13,19 @@ export const SEV_COLOR = {
   INFO:     { fg: "var(--slate)",  bg: "var(--slate-bg)",  bd: "var(--slate-border)" },
 };
 export const VERDICT_COLOR = {
+  // New (Impact × Evidence) model: REJECT / PASS / ERROR.
   REJECT:      { fg: "var(--red)",   bg: "var(--red-bg)",   bd: "var(--red-border)" },
+  PASS:        { fg: "var(--green)", bg: "var(--green-bg)", bd: "var(--green-border)" },
+  ERROR:       { fg: "var(--slate)", bg: "var(--slate-bg)", bd: "var(--slate-border)" },
+  // Legacy scorer verdicts (older sessions on disk).
   CONDITIONAL: { fg: "var(--amber)", bg: "var(--amber-bg)", bd: "var(--amber-border)" },
   APPROVE:     { fg: "var(--green)", bg: "var(--green-bg)", bd: "var(--green-border)" },
   UNSCANNED:   { fg: "var(--slate)", bg: "var(--slate-bg)", bd: "var(--slate-border)" },
 };
-export const VERDICT_ICON = { REJECT: "✕", CONDITIONAL: "!", APPROVE: "✓", UNSCANNED: "·" };
+export const VERDICT_ICON = {
+  REJECT: "✕", PASS: "✓", ERROR: "?",
+  CONDITIONAL: "!", APPROVE: "✓", UNSCANNED: "·",
+};
 
 export function scoreColor(s) {
   if (s >= 0.75) return "var(--red)";
