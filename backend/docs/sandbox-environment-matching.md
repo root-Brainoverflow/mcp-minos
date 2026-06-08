@@ -73,6 +73,15 @@ stdio 채널이 열린 Sandbox
 ### 2.1 출력
 
 `RuntimeResolver.resolve(server)`는 `ResolvedRuntime(image, command, reason)`을
+> **참고 (EnvironmentSnapshot 경로).** `resolve()`는 이제 선택적 두 번째 인자
+> `snapshot: EnvironmentSnapshot | None`을 받는다. 동적 파이프라인(cli →
+> orchestrator → `Sandbox`)은 정적 분석기가 만든 스냅샷을 항상 넘기며, 스냅샷에
+> `engines_node`/`requires_python`이 있으면 그 값이 디스크 매니페스트 읽기보다
+> **우선**한다. 스냅샷은 원격 패키지에 대해서도 (tarball/npm-view/PyPI에서)
+> 이 제약을 채울 수 있으므로, 아래 2.2·2.2.1에서 "원격은 DEFAULT로 폴백"이라고
+> 적은 부분은 스냅샷이 없을 때(예: `RuntimeResolver`를 단독 호출할 때)에만
+> 해당한다. 스냅샷이 제약을 담고 있으면 원격 패키지도 선언된 버전으로 베이스
+> 이미지가 정해진다.
 돌려준다. `image`는 도커 베이스 이미지 태그, `command`는 그 이미지 안에서 실행할
 명령(컨테이너 PATH에서 해석 가능한 형태로 정규화된 것), `reason`은 어느 분기로
 정해졌는지를 적은 사람이 읽는 문자열(로그용).
@@ -176,6 +185,17 @@ identity 토큰만으로 매칭을 시도하므로 분석이 멈추지는 않는
 `SourcePreflightInspector.inspect()`는 다음 순서로 시도하고, 먼저 신호를 주는
 소스를 채택한다. 한 번의 분석에서 셋이 모두 돌지 않는다 — 로컬이 잡히면 원격은
 보지 않는다.
+
+> **참고 (스냅샷 단락).** `inspect()`는 이제 `snapshot` 인자를 받아, 비어 있지
+> 않은 스냅샷이 오면 아래 (A)~(C)를 전부 건너뛰고 `_evidence_from_snapshot()`으로
+> 스냅샷을 곧바로 evidence로 변환한다(디스크 읽기·`npm view`·PyPI 호출 없음).
+> 원본 `origin`이 `LOCAL_SOURCE`면 `source="local-manifest"`(따라서
+> `_local_install_action`도 발동), `EXTRACTED_TARBALL`이면
+> `source="extracted-tarball:<package_name>"`로 태깅된다. 후자에서는 정적
+> 분석기가 tarball을 풀어 소스를 스캔했으므로 **원격 패키지인데도
+> `source_signals`가 채워질 수 있다** — 3.2(B)/3.2(C)/3.3의 "원격 분기에서
+> `source_signals`는 항상 비어 있다"는 서술은 스냅샷이 없는 호스트-사이드 원격
+> 조회 경로에만 해당한다.
 
 #### (A) 로컬 매니페스트 — `_inspect_local_manifests`
 
@@ -648,7 +668,11 @@ env에 없을 때만 추가한다. 호스트 cwd를 마운트하지 않는 것�
 **(i) 추가 마운트** — (b)에서 만든 `extra_mounts`는 모두 `:ro`로 추가한다.
 
 **(j) HTTP 포트** — `server.transport == "http"`이고 `http_port`가 있으면
-`-p 127.0.0.1:<port>:<port>/tcp`. 다른 인터페이스에는 노출하지 않는다.
+`_pick_free_port()`로 매 (재)시작마다 비어 있는 호스트 포트를 새로 골라
+`-p 127.0.0.1:<free_host_port>:<http_port>/tcp`로 publish한다(`127.0.0.1`에만
+노출). 호스트 포트를 고정값이 아닌 자유 포트로 잡는 이유는 동시 실행되는 두
+HTTP-transport 스캔이 같은 호스트 포트를 두고 충돌하지 않게 하기 위해서다.
+고른 포트는 `self._host_http_port`에 저장되고 `http_base_url`이 그 포트를 보고한다.
 
 **(k) 이미지·command·args**
 

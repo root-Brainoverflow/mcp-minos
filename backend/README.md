@@ -46,6 +46,10 @@ ad-hoc spec).
 - `minos scan --target <name>` — run both. Static source-tree scanners
   before Docker, then dynamic, then static metadata scanners on the
   captured `tools/list` response. JSON output via `--format json`.
+All three scanning commands accept `--target <name>` or an ad-hoc
+`--command/--arg` spec. `scan` and `dynamic` also take `--timeout <sec>` to
+raise the sandbox scan-budget ceiling (overrides the config; heavy servers
+need more).
 
 Ad-hoc example without prior discovery:
 
@@ -84,6 +88,26 @@ runtime tool list.
                        ▼
                 JSON / summary
 ```
+### Verdict model
+
+Across the merged static + dynamic finding pool the analyzer computes a single
+verdict from an (Impact × Evidence) severity model
+(`dynamic/output/verdict.py`, see [docs/severity-verdict-model.md](docs/severity-verdict-model.md)):
+
+- **REJECT** — at least one strong-evidence (REALIZED / DETERMINISTIC)
+  confidentiality/integrity compromise (incl. host takeover) reachable from
+  tool input.
+- **PASS** — fully-tested scan with no blocking finding; carries a non-blocking
+  warnings breakdown (availability, static-only suspicion, limited leak,
+  potential memory corruption).
+- **ERROR (검사 불가)** — the scan could not establish coverage (server never
+  booted, no tools, sequences cut short), so "no evidence" is never reported as
+  "safe".
+
+The decision and full detail are persisted to each session's `findings.json`
+(`metadata.verdict` / `metadata.verdict_detail`; the legacy per-risk scorer
+string is kept as `metadata.legacy_verdict`) and surfaced by the CLI summary
+and the read API.
 
 ### Static layer (`src/mcp_security_analyzer/static/`)
 
@@ -123,10 +147,27 @@ runtime tool list.
   text scan.
 - `scanners/chain_attack.py` — server-metadata-based chain attack
   detection (`readOnlyHint` mismatches, destructive follow-up steering).
+- `infrastructure/sysmon.py` — cross-platform runtime syscall/process monitor.
+  Inside Docker it runs `strace -f -p 1` against the server (the container's
+  PID 1) via `docker exec`, emitting `file_open` / `file_read` / `file_write` /
+  `process_exec` / `network_connect` events; the host needs no strace. Local
+  runs fall back to `strace` (Linux), `lsof` polling (macOS), or `psutil`.
 - `protocol/`, `correlation/`, `output/` — JSON-RPC client, event store,
   scorer, exporter.
 
 ## Documentation
+## Web app
+
+The repo is a `backend/` + `frontend/` monorepo. `backend/src/mcp_security_analyzer/api/`
+is a FastAPI read-API (`minos-api`, or
+`uvicorn mcp_security_analyzer.api.main:app`) that serves real scan output from
+`results/` (no demo/sample fallback when `results/` is empty) and can launch a
+real `minos` scan as a subprocess (`POST /api/scans`), streaming the CLI's
+live stderr over SSE (`GET /api/scans/{id}/stream`). The backend is safe for
+concurrent scans: each session is attributed deterministically from its own
+scan's `session_id` in stderr. `frontend/` is a Vite/React UI over that API
+with an active-scan list and per-scan report detail.
+
 
 - [docs/static-analysis.md](docs/static-analysis.md) — static layer in
   detail, scanner-by-scanner.
@@ -151,7 +192,9 @@ runtime tool list.
   / custom transform and pydantic custom validators are not represented;
   the schema auditor falls back to the runtime `tools/list` for those
   tools.
-- Static and dynamic findings are emitted side-by-side; a unified scoring
-  model is not yet implemented.
+- Static and dynamic memory-corruption detection on the Docker path is
+  best-effort: the inner server's crash signal is masked by the container's
+  return code, so the memory-corruption warning is reliable mainly on the
+  `--no-docker` (local) path.
 - Extracted tarballs are removed at the end of a run. New rules require
   refetching the package.

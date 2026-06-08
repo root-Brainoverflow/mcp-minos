@@ -1,9 +1,9 @@
 // scanflow.jsx — Discover, Configure, Live Progress.
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import { Card, Button, Mono, VerdictPill, Spinner, RefreshButton, Loading, ErrorState } from "../components/ui.jsx";
 import { ScreenHead, SectionLabel, Meta } from "../components/common.jsx";
 import { MINOS_DATA } from "../data.js";
-import { connectScanStream, fetchServers } from "../api.js";
+import { fetchServers } from "../api.js";
 import { useApi } from "../hooks.js";
 import { t, getLang } from "../i18n.js";
 
@@ -134,6 +134,8 @@ const PROFILES = [
 export function ConfigureScreen({ server, onBack, onLaunch }) {
   const [profile, setProfile] = useState("scan");
   const [docker, setDocker] = useState(true);
+  const [budget, setBudget] = useState("");        // scan timeout (s); "" = profile default
+  const budgetActive = profile !== "static" && budget !== "" && Number(budget) > 0;
   const cmd = server.command + " " + server.args.join(" ");
   return (
     <div className="fade-up" style={{ maxWidth: "var(--maxw)", margin: "0 auto", padding: "0 28px 80px" }}>
@@ -179,11 +181,35 @@ export function ConfigureScreen({ server, onBack, onLaunch }) {
         />
       </Card>
 
+      <SectionLabel>{t("configure.budget")}</SectionLabel>
+      <Card pad="14px 18px" style={{ marginBottom: 26 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+          <div style={{ flex: 1, minWidth: 240 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>{t("configure.budgetLabel")}</div>
+            <div style={{ fontSize: 12.5, color: "var(--text-3)", marginTop: 4, lineHeight: 1.5, maxWidth: 560 }}>{t("configure.budgetSub")}</div>
+          </div>
+          <div style={{ display: "inline-flex", alignItems: "center", gap: 8, flex: "none" }}>
+            <input
+              type="number" min="30" step="30" value={budget}
+              onChange={(e) => setBudget(e.target.value)}
+              placeholder={t("configure.budgetDefault")} disabled={profile === "static"}
+              className="focusable"
+              style={{
+                width: 110, padding: "8px 11px", fontSize: 13.5, fontFamily: "var(--mono)", color: "var(--text)",
+                background: "var(--surface)", border: "1px solid var(--border-strong)", borderRadius: 8,
+                opacity: profile === "static" ? 0.45 : 1,
+              }}
+            />
+            <span style={{ fontSize: 12.5, color: "var(--text-3)" }}>{t("configure.budgetUnit")}</span>
+          </div>
+        </div>
+      </Card>
+
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
         <Mono style={{ flex: 1, minWidth: 260, background: "var(--text)", color: "#e9e9e6", border: "1px solid var(--text)" }}>
-          <span style={{ color: "#8a897f" }}>$</span> minos {profile} --target {server.name}{profile !== "static" && !docker ? " --no-docker" : ""}
+          <span style={{ color: "#8a897f" }}>$</span> minos {profile} --target {server.name}{profile !== "static" && !docker ? " --no-docker" : ""}{budgetActive ? ` --timeout ${budget}` : ""}
         </Mono>
-        <Button size="lg" onClick={() => onLaunch(profile, docker)} icon={<span style={{ fontSize: 15 }}>▶</span>}>
+        <Button size="lg" onClick={() => onLaunch(profile, docker, budgetActive ? Number(budget) : null)} icon={<span style={{ fontSize: 15 }}>▶</span>}>
           {t("configure.launch")}
         </Button>
       </div>
@@ -327,87 +353,75 @@ function formatDetail(eventName, rest) {
   return "";
 }
 
-export function ProgressScreen({ scan, onComplete, onBack, onViewResults }) {
-  // Scan lifecycle lives in App (props.scan) so navigating away & back doesn't
-  // restart it or reset the timer. This screen only renders + reconnects.
-  const server = scan.server;
-  const scanId = scan.id;
-  // Phase rail follows the chosen profile — a static-only scan has no dynamic
-  // sandbox phase, a dynamic-only scan has no static phase.
-  const profile = (server && server.profile) || "scan";
-  const phaseIds = profile === "static" ? ["static", "analysis"]
+// Phase ids shown in the rail, by profile.
+function _phaseIdsFor(profile) {
+  return profile === "static" ? ["static", "analysis"]
     : profile === "dynamic" ? ["dynamic", "analysis"]
     : ["static", "dynamic", "analysis"];
-  const [steps, setSteps] = useState([]);       // structured step rows
-  const [rawLines, setRawLines] = useState([]); // cleaned raw output (for toggle)
+}
+
+// Pure reduction of the minos stderr lines into structured step rows + the
+// current phase. `finalStatus` (when the scan ended) appends a completion row.
+// This replaces the old incremental handleLine so the SSE stream can live in
+// App (one per concurrent scan) and ProgressScreen just renders from props.
+function buildSteps(lines, profile, noDocker, finalStatus, sessionId) {
+  const phaseIds = _phaseIdsFor(profile);
+  let steps = [];
+  let phase = phaseIds[0];
+  for (const rawLine of lines) {
+    const { eventName, rest } = parseMinos(rawLine);
+    const def = eventToStep(eventName);
+    if (!def) continue;
+    if (phaseIds.includes(def.phase)) phase = def.phase;
+    const detail = formatDetail(eventName, rest);
+    const labelKey = noDocker && def.keyLocal ? def.keyLocal : def.key;
+    const marked = steps.length ? [...steps.slice(0, -1), { ...steps[steps.length - 1], done: true }] : steps;
+    const last = marked[marked.length - 1];
+    if (last && last.labelKey === labelKey && !def.status) {
+      steps = [...marked.slice(0, -1), { ...last, detail: detail || last.detail, done: false }];
+    } else {
+      steps = [...marked, { labelKey, phase: def.phase, detail, status: def.status || null, done: false }];
+    }
+  }
+  if (finalStatus) {
+    const ok = finalStatus === "done" && !!sessionId;
+    steps = steps.map((s) => ({ ...s, done: true }));
+    steps.push({
+      labelKey: ok ? "progress.complete" : sessionId ? "progress.finishedErrors" : "progress.failedNoReport",
+      phase: "analysis", detail: sessionId || "", status: ok ? "ok" : "crash", done: true,
+    });
+  }
+  return { steps, phase };
+}
+
+// Renderer for ONE scan. The scan object (incl. live `lines` + `status`) is
+// owned/streamed by App so this stays a pure view that survives navigation and
+// works for any of several concurrent scans.
+export function ProgressScreen({ scan, onBack, onViewResults, onBackToList }) {
+  const server = scan.server;
+  const scanId = scan.id;
+  const profile = (server && server.profile) || "scan";
+  const noDocker = server && server.docker === false;
+  const phaseIds = _phaseIdsFor(profile);
+
   const [rawOpen, setRawOpen] = useState(false);
-  const [phase, setPhase] = useState(phaseIds[0]);
-  const [streamError, setStreamError] = useState(null);
-  const [done, setDone] = useState(false);
-  const [hasSession, setHasSession] = useState(false);
   const [elapsed, setElapsed] = useState(Math.max(0, (Date.now() - scan.startedAt) / 1000));
   const rawRef = useRef(null);
-  const scanError = scan.error || streamError;
 
-  // Add/merge a structured step from a parsed minos log line.
-  const handleLine = (rawLine) => {
-    const { eventName, rest } = parseMinos(rawLine);
-    const clean = rawLine.replace(ANSI_RE, "").trim();
-    if (clean) setRawLines((p) => [...p, clean]);
+  const lines = scan.lines || [];
+  const status = scan.status || "running";
+  const done = status !== "running";
+  const scanError = scan.error || null;
+  const hasSession = !!scan.sessionId;
 
-    const def = eventToStep(eventName);
-    if (!def) return;
-    if (phaseIds.includes(def.phase)) setPhase(def.phase);
-    const detail = formatDetail(eventName, rest);
-    // No Docker → use the "no sandbox" wording for sandbox-named steps.
-    const noDocker = server && server.docker === false;
-    const labelKey = noDocker && def.keyLocal ? def.keyLocal : def.key;
-
-    setSteps((prev) => {
-      // Mark the previous step done as a new distinct step begins.
-      const marked = prev.length ? [...prev.slice(0, -1), { ...prev[prev.length - 1], done: true }] : prev;
-      const last = marked[marked.length - 1];
-      if (last && last.labelKey === labelKey && !def.status) {
-        // Same step → just refresh its detail (avoid duplicate rows).
-        return [...marked.slice(0, -1), { ...last, detail: detail || last.detail, done: false }];
-      }
-      return [...marked, { labelKey, phase: def.phase, detail, status: def.status || null, done: false }];
-    });
-  };
-
-  // Connect (or RE-connect) to the scan's SSE stream. The backend replays all
-  // accumulated lines from the start, so a remount rebuilds the step view.
-  useEffect(() => {
-    if (!scanId) return;
-    // Reset derived view state for a clean rebuild from the replayed stream.
-    setSteps([]);
-    setRawLines([]);
-    setDone(false);
-    setStreamError(null);
-    const close = connectScanStream(scanId, {
-      onLine: handleLine,
-      onDone: ({ status, session_id }) => {
-        const ok = status === "done" && !!session_id;
-        setDone(true);
-        setSteps((prev) => {
-          const allDone = prev.map((s) => ({ ...s, done: true }));
-          return [...allDone, {
-            labelKey: ok ? "progress.complete" : session_id ? "progress.finishedErrors" : "progress.failedNoReport",
-            phase: "analysis",
-            detail: session_id || "",
-            status: ok ? "ok" : "crash",
-            done: true,
-          }];
-        });
-        if (session_id) {
-          setHasSession(true);
-          setTimeout(() => onComplete(session_id), 900);
-        }
-      },
-      onError: (err) => setStreamError(err.message),
-    });
-    return close;
-  }, [scanId]);
+  const { steps, phase } = useMemo(
+    () => buildSteps(lines, profile, noDocker, done ? status : null, scan.sessionId),
+    [scan.key, lines, status, scan.sessionId, profile, noDocker],
+  );
+  const rawLines = useMemo(
+    () => lines.map((l) => l.replace(ANSI_RE, "").trim()).filter(Boolean),
+    [lines],
+  );
 
   // Auto-scroll raw log when open
   useEffect(() => {
@@ -415,15 +429,13 @@ export function ProgressScreen({ scan, onComplete, onBack, onViewResults }) {
   }, [rawLines, rawOpen]);
 
   useEffect(() => {
-    if (done) return;
+    if (done) return undefined;
     const i = setInterval(() => setElapsed((Date.now() - scan.startedAt) / 1000), 250);
     return () => clearInterval(i);
   }, [done, scan.startedAt]);
 
-  // No Docker → the dynamic phase isn't sandboxed, so call it "Dynamic analysis".
-  const noDockerRun = server && server.docker === false;
   const phaseLabel = (id) =>
-    id === "dynamic" && noDockerRun ? t("progress.phase.dynamicLocal") : t(`progress.phase.${id}`);
+    id === "dynamic" && noDocker ? t("progress.phase.dynamicLocal") : t(`progress.phase.${id}`);
   const phases = phaseIds.map((id) => ({ id, label: phaseLabel(id) }));
   const curIdx = phaseIds.indexOf(phase);
   const running = !done && !scanError;
@@ -541,6 +553,9 @@ export function ProgressScreen({ scan, onComplete, onBack, onViewResults }) {
       )}
 
       <div style={{ display: "flex", justifyContent: "center", gap: 12, marginTop: 18, flexWrap: "wrap", alignItems: "center" }}>
+        {onBackToList && (
+          <Button variant="ghost" size="md" onClick={onBackToList}>{t("active.backToList")}</Button>
+        )}
         {done && !hasSession && (
           <Button variant="secondary" size="md" onClick={onBack}>{t("progress.back")}</Button>
         )}
@@ -554,6 +569,53 @@ export function ProgressScreen({ scan, onComplete, onBack, onViewResults }) {
         )}
       </div>
     </div>
+  );
+}
+
+// List of concurrently-running scans (shown when more than one is active).
+// Clicking a row opens that scan's ProgressScreen.
+export function ActiveScansList({ scans, onOpen }) {
+  return (
+    <div className="fade-up" style={{ maxWidth: 760, margin: "0 auto", padding: "0 28px 80px" }}>
+      <ScreenHead
+        eyebrow={t("progress.eyebrow")}
+        title={t("active.title")}
+        sub={t("active.sub", { n: scans.length })}
+      />
+      <div style={{ display: "grid", gap: 10 }}>
+        {scans.map((s) => <ActiveScanRow key={s.key} scan={s} onOpen={() => onOpen(s.key)} />)}
+      </div>
+    </div>
+  );
+}
+
+function ActiveScanRow({ scan, onOpen }) {
+  const [elapsed, setElapsed] = useState(Math.max(0, (Date.now() - scan.startedAt) / 1000));
+  useEffect(() => {
+    if (scan.status !== "running") return undefined;
+    const i = setInterval(() => setElapsed((Date.now() - scan.startedAt) / 1000), 1000);
+    return () => clearInterval(i);
+  }, [scan.status, scan.startedAt]);
+  const running = scan.status === "running";
+  const profile = (scan.server && scan.server.profile) || "scan";
+  return (
+    <Card pad={0} hover onClick={onOpen} style={{ cursor: "pointer" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 14, padding: "15px 18px" }}>
+        <span style={{
+          width: 8, height: 8, borderRadius: 999, flex: "none",
+          background: running ? "var(--orange)" : scan.error ? "var(--red)" : "var(--green)",
+          animation: running ? "mn-pulse 1.2s infinite" : "none",
+        }} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 14.5, fontWeight: 600, fontFamily: "var(--mono)", letterSpacing: "-0.01em" }}>{scan.server?.name || scan.server?.command}</div>
+          <div style={{ fontSize: 12, color: "var(--text-3)", marginTop: 3, fontFamily: "var(--mono)" }}>
+            {profile} · {running ? t("active.running") : scan.error ? t("active.failed") : t("active.done")}
+          </div>
+        </div>
+        <span className="tnum" style={{ fontFamily: "var(--mono)", fontSize: 12.5, color: "var(--text-3)" }}>{elapsed.toFixed(0)}s</span>
+        <span style={{ fontSize: 14, color: "var(--text-faint)" }}>›</span>
+      </div>
+    </Card>
   );
 }
 

@@ -34,14 +34,16 @@ collect_environment_snapshot()       ─▶ EnvironmentSnapshot ─▶ (동적�
         │  (로컬 소스 / 원격 패키지 분기)
         │
         ▼ snapshot.source_tree_path
-[동적] init → tools/list → 런타임 도구 목록 수집
-        │
-        ▼ snapshot + (있으면) 런타임 도구 목록
-run_static_findings()                ─▶ StaticReport
+run_static_findings(include_divergence=False)  ─▶ StaticReport (+ source_tools)
         │  매니페스트·Semgrep (단순 + taint 모드) (소스 트리)
         │  도구 추출 (이름·설명·스키마)             ─▶ 2.4·2.5 입력 (소스 우선)
-        │  런타임 목록                              ─▶ 2.4·2.5 입력 (폴백)
-        │  소스 목록 ∩ 런타임 목록                  ─▶ 2.6 차이 검사 (양쪽 있을 때만)
+        │  설명문·스키마 감사 (소스 도구 목록으로 선실행)
+        ▼  (소스 스캐너는 샌드박스 부팅 *이전*에 끝남)
+[동적] init → tools/list → 런타임 도구 목록 수집
+        │
+        ▼ source_tools + 런타임 목록
+scan_metadata_divergence()           ─▶ 2.6 차이 검사 (양쪽 있을 때만, 동적 *이후*)
+        │  (소스 추출 실패로 도구를 못 잡았으면 2.4·2.5는 런타임 목록으로 폴백)
         ▼
 ```
 
@@ -361,7 +363,10 @@ PipeLab MCP 프록시·Invariant Labs `mcp-scan`이 짚은 우회 채널들이�
 
 **검사 항목.**
 
-- **비가시 유니코드** — 폭 0 문자, BOM, 글자 방향 제어, 태그 문자. CRITICAL.
+- **비가시 유니코드** — 폭 0 문자, BOM, 글자 방향 제어, 태그 문자. CRITICAL.  심각도는 CRITICAL로 동일하나 `kind`가 갈린다: 글자 방향 제어(bidi)·태그
+  블록 등 정당한 용도가 없는 문자는 `r3.invisible_unicode_bidi`(DETERMINISTIC),
+  i18n·이모지에 정상적으로 쓰일 수 있는 폭 0 문자는 `r3.invisible_unicode_zw`
+  (POTENTIAL)로 표기 — verdict 모델의 §4.4 분류와 맞물린다.
 - **역할 가로채기/지시 주입** — `ignore-previous`·`you-are-now`·`disregard`·
   `system-prompt`·`as-an-admin`·`new-instructions`·`do-not-tell`·`override`
   카드 8개. HIGH.
@@ -428,8 +433,11 @@ true`, 제약 없는 문자열 필드, path/url/cmd 같은 민감 이름인데 �
 
 - `minos static`: 런타임 도구 목록 없음. 소스 추출이 되면 네 스캐너가 돈다
   (매니페스트·Semgrep·설명문·스키마). 차이 스캐너는 건너뜀.
-- `minos scan`: 동적 종료 후 런타임 도구 목록을 같이 넘김. 다섯 스캐너 모두
-  발동.
+- `minos scan`: 소스 스캐너 네 개(매니페스트·Semgrep·설명문·스키마)를 샌드박스
+  부팅 *이전*에 `run_static_findings(include_divergence=False)`로 먼저 돌린다.
+  메타데이터 차이 스캐너(2.6)만 동적 종료 후 런타임 `tools/list`로 따로 발동
+  (`scan_metadata_divergence(source_tools, output.tools)`). 끝나면 정적+동적
+  발견을 합쳐 통합 verdict를 세션 `findings.json`에 영구 저장한다.
 
 ### 2.8 Semgrep과 자체 스캐너의 분담
 
@@ -464,16 +472,20 @@ Semgrep은 코드를 보고, 자체 스캐너는 코드가 아닌 입력을 보�
 
 ## 3. 명령행
 
-세 명령이 `--target <이름>` / `--command --arg` 인터페이스를 공유한다.
+세 명령이 `--target <이름>` / `--command --arg` 인터페이스를 공유한다. `scan`·
+`dynamic`은 `--timeout <초>`로 설정의 샌드박스 타임아웃을 덮어쓸 수 있다.
 
 - `minos static` — 정적만. 도커 불필요. zod·pydantic 기반 서버는 매니페스트·
   Semgrep·설명문·스키마 네 스캐너가 소스만으로 작동. 소스 추출 실패 시(휠 전용
   PyPI 패키지 등) 설명문·스키마 스캐너는 건너뜀.
 - `minos dynamic` — 동적만. 환경 스냅샷은 만들어 샌드박스 환경 정합에 쓰지만
   정적 발견은 만들지 않음. `--no-docker` 지원.
-- `minos scan` — 정적 + 동적 통합. 정적이 네 스캐너를 돌리고 동적 종료 후
-  런타임 `tools/list`로 폴백 입력을 마련. 소스 추출이 잡힌 도구는 그대로 유지,
-  안 잡힌 도구는 런타임으로 보충. JSON 출력은 정적·동적 결과를 모두 담음.
+- `minos scan` — 정적 + 동적 통합. 소스 스캐너 네 개(매니페스트·Semgrep·
+  설명문·스키마)는 샌드박스 부팅 *이전*에 돈다. 동적 종료 후엔 메타데이터 차이
+  스캐너만 런타임 `tools/list`로 추가 실행. 소스 추출이 잡힌 도구는 그대로 유지,
+  안 잡힌 도구는 (소스 추출이 비었을 때) 런타임 도구 목록으로 폴백. JSON 출력은
+  정적·동적 결과 + 통합 verdict를 모두 담고, 같은 통합 verdict와 합쳐진 발견을
+  세션 `findings.json`에 저장한다.
 
 `--format json`은 세 명령 모두 동일. 로그는 stderr, 명령 출력(JSON 포함)은
 stdout으로 분리.
@@ -513,8 +525,9 @@ R3·R4 스캐너 담당. 위 표는 텍스트만 보는 정적 검사에 한정.
 - **소스 추출은 휴리스틱.** 런타임에 도구 정의를 동적으로 구성하는 드문 경우
   (이름·설명을 변수로 합성 등)는 못 잡음. 2.4는 그런 경우 런타임 입력으로
   자동 폴백.
-- **정적·동적 점수 통합 미구현.** 현재 정적·동적 발견은 각각 출력되며 하나의
-  점수로 합쳐지지 않음.
+- **정적·동적 verdict 통합 구현됨.** `minos scan`은 정적+동적 발견을 합집합으로
+  모아 `verdict.evaluate(...)`로 단일 통합 verdict(REJECT/PASS/ERROR)를 산출하고,
+  세션 `findings.json`에 영구 저장한다(별도 점수 합산은 아직 없음).
 - **추출 트리의 영구 저장 미구현.** 실행 종료 시 임시 디렉터리가 지워짐. 새
   규칙으로 재분석하려면 패키지를 다시 받아야 함.
 - **기능 선언 감사 미구현.** SDK별 패턴 의존이 커서 제외.

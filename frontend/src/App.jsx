@@ -2,13 +2,13 @@
 //
 // The design's live "Tweaks" panel (a design-tool artifact) is dropped; its
 // final chosen defaults are baked in as constants below.
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Sidebar, SettingsScreen, ActiveScanIdle, StaticScanScreen, ResultsListScreen } from "./screens/sidebar.jsx";
 import { DashboardScreen } from "./screens/dashboard.jsx";
-import { DiscoverScreen, ConfigureScreen, ProgressScreen } from "./screens/scanflow.jsx";
+import { DiscoverScreen, ConfigureScreen, ProgressScreen, ActiveScansList } from "./screens/scanflow.jsx";
 import { ResultsScreen, FindingsScreen } from "./screens/report.jsx";
 import { LoginScreen } from "./screens/login.jsx";
-import { fetchHealth, createScan } from "./api.js";
+import { fetchHealth, createScan, connectScanStream } from "./api.js";
 import { t, getLang, setLang } from "./i18n.js";
 
 // ── Baked design defaults (were the "Tweaks" panel controls) ────────────────
@@ -31,15 +31,27 @@ export default function App() {
   const [stage, setStage] = useState(initialAuth.signedIn ? "dashboard" : "login");
   const [server, setServer] = useState(null);
   const [session, setSession] = useState(null);
-  const [scanning, setScanning] = useState(false);
   const [scanFlow, setScanFlow] = useState(false); // in the live configure→scan→report flow
   const [health, setHealth] = useState(null);
   const [lang, setLangState] = useState(getLang());
   const changeLang = (l) => { setLang(l); setLangState(l); };
-  // Active scan lives here (not in ProgressScreen) so navigating away & back
-  // doesn't restart the scan or reset the timer. ProgressScreen just reconnects.
-  // { id, startedAt, server, error }
-  const [scan, setScan] = useState(null);
+  // Concurrent scans live here (not in ProgressScreen). App owns each scan's SSE
+  // stream so background scans keep progressing/completing while another (or
+  // none) is on screen. scan = { key, id, startedAt, server, etaSec, error,
+  // status: "running"|"done"|"error", sessionId, lines }
+  const [scans, setScans] = useState([]);
+  const [activeScanKey, setActiveScanKey] = useState(null); // which scan's detail is shown
+  const streamsRef = useRef(new Map()); // scan.key -> close()
+  const keyRef = useRef(0);
+
+  const runningScans = scans.filter((s) => s.status === "running");
+  const scanning = runningScans.length > 0;
+  const activeScan = scans.find((s) => s.key === activeScanKey) || null;
+  // The scan whose detail is on screen: an explicitly picked one, or — when only
+  // one is running and none picked — that single runner. null → idle/list.
+  const viewedScan = activeScan || (runningScans.length === 1 ? runningScans[0] : null);
+  const patchScan = (key, patch) =>
+    setScans((prev) => prev.map((s) => (s.key === key ? { ...s, ...(typeof patch === "function" ? patch(s) : patch) } : s)));
 
   useEffect(() => {
     document.documentElement.setAttribute("data-density", DENSITY);
@@ -58,31 +70,71 @@ export default function App() {
     return () => { alive = false; };
   }, []);
 
+  // One SSE stream per running scan, owned by App so background scans keep
+  // streaming + completing regardless of which (if any) is on screen.
+  useEffect(() => {
+    scans.forEach((s) => {
+      if (!s.id || s.status !== "running" || streamsRef.current.has(s.key)) return;
+      const close = connectScanStream(s.id, {
+        onLine: (line) => patchScan(s.key, (cur) => ({ lines: [...cur.lines, line] })),
+        onDone: ({ status, session_id }) => {
+          patchScan(s.key, {
+            status: status === "done" && session_id ? "done" : "error",
+            sessionId: session_id || null,
+          });
+          const c = streamsRef.current.get(s.key);
+          if (c) { c(); streamsRef.current.delete(s.key); }
+        },
+        onError: (err) => patchScan(s.key, { error: err.message || "Lost connection" }),
+      });
+      streamsRef.current.set(s.key, close);
+    });
+  }, [scans]);
+
+  // Close every stream when the app unmounts.
+  const streams = streamsRef.current;
+  useEffect(() => () => { streams.forEach((c) => c()); streams.clear(); }, [streams]);
+
+  // When the scan being VIEWED finishes with a session, go to its report
+  // (matches the single-scan UX). Background scans never trigger navigation.
+  useEffect(() => {
+    if (stage !== "progress" || !viewedScan) return undefined;
+    if (viewedScan.status === "done" && viewedScan.sessionId) {
+      const sid = viewedScan.sessionId;
+      const tid = setTimeout(() => { setSession({ session_id: sid }); setScanFlow(true); go("report"); }, 900);
+      return () => clearTimeout(tid);
+    }
+    return undefined;
+  }, [stage, viewedScan?.key, viewedScan?.status, viewedScan?.sessionId]);
+
   const go = (s) => { window.scrollTo({ top: 0 }); setStage(s); };
 
   const selectServer = (s) => { setServer(s); setScanFlow(true); go("configure"); };
 
-  // Start the scan ONCE here (not in ProgressScreen) and store it in App state.
-  const launch = (profile, docker) => {
+  // Start a scan; append it (concurrency-safe) and open its detail. Other scans
+  // keep running — the backend + App's per-scan SSE stream handle them.
+  const launch = (profile, docker, timeout) => {
     const srv = { ...server, profile, docker };
     setServer(srv);
-    setScanning(true);
+    const key = `sc${(keyRef.current += 1)}`;
+    setScans((prev) => [...prev, {
+      key, id: null, startedAt: Date.now(), server: srv,
+      etaSec: null, error: null, status: "running", sessionId: null, lines: [],
+    }]);
+    setActiveScanKey(key);
     setScanFlow(true);
-    setScan({ id: null, startedAt: Date.now(), server: srv, error: null });
     go("progress");
-    createScan({ name: srv.name, command: srv.command, args: srv.args, profile, docker })
-      .then((res) => setScan((s) => (s ? { ...s, id: res.scan_id, etaSec: res.eta_sec } : s)))
-      .catch((e) => setScan((s) => (s ? { ...s, error: e.message || "Failed to start scan" } : s)));
+    createScan({ name: srv.name, command: srv.command, args: srv.args, profile, docker, timeout })
+      .then((res) => patchScan(key, { id: res.scan_id, etaSec: res.eta_sec }))
+      .catch((e) => patchScan(key, { error: e.message || "Failed to start scan", status: "error" }));
   };
 
-  // Called by ProgressScreen when the scan produces a real session_id.
-  const finishScan = (sessionId) => {
-    setScanning(false);
-    setScan(null);
-    if (!sessionId) return; // no session — ProgressScreen shows error, user clicks Back
-    setSession({ session_id: sessionId });
-    setScanFlow(true);
-    go("report");
+  // Drop a scan from the list (close its stream).
+  const dropScan = (key) => {
+    const close = streamsRef.current.get(key);
+    if (close) { close(); streamsRef.current.delete(key); }
+    setScans((prev) => prev.filter((s) => s.key !== key));
+    setActiveScanKey((k) => (k === key ? null : k));
   };
 
   // open a session's full report (from the results list or a dashboard row) — not the scan flow
@@ -93,13 +145,16 @@ export default function App() {
     setScanFlow(false);
     if (id === "discover") { setServer(null); go("discover"); }
     else if (id === "dashboard") { setServer(null); go("dashboard"); }
+    else if (id === "progress") { setActiveScanKey(null); go("progress"); } // list when >1
     else go(id);
   };
 
   const signOut = () => {
     const a = { signedIn: false };
     setAuth(a); localStorage.setItem("minos_auth", JSON.stringify(a));
-    setServer(null); setSession(null); setScanning(false);
+    setServer(null); setSession(null);
+    streamsRef.current.forEach((c) => c()); streamsRef.current.clear();
+    setScans([]); setActiveScanKey(null);
     go("login");
   };
   const signIn = (method, email, keep, role) => {
@@ -109,6 +164,27 @@ export default function App() {
     else localStorage.setItem("minos_auth", JSON.stringify(a));
     go("dashboard");
   };
+
+  const goDiscover = () => { setServer(null); go("discover"); };
+
+  // Active-scan view: idle (none) / detail (one picked or a single runner) /
+  // list (several running, none picked).
+  function renderProgress() {
+    if (scans.length === 0) return <ActiveScanIdle onPick={goDiscover} />;
+    const viewing = viewedScan;
+    if (viewing) {
+      return (
+        <ProgressScreen
+          scan={viewing}
+          onBack={() => { dropScan(viewing.key); if (scans.length <= 1) goDiscover(); }}
+          onViewResults={() => { setActiveScanKey(null); go("results"); }}
+          onBackToList={runningScans.length > 1 ? () => setActiveScanKey(null) : undefined}
+        />
+      );
+    }
+    if (runningScans.length >= 1) return <ActiveScansList scans={runningScans} onOpen={setActiveScanKey} />;
+    return <ActiveScanIdle onPick={goDiscover} />;
+  }
 
   // Login is a full-screen gate — no sidebar / topbar chrome.
   if (stage === "login") {
@@ -121,7 +197,7 @@ export default function App() {
 
   return (
     <div style={{ "--accent": ACCENT, minHeight: "100vh", display: "flex", alignItems: "flex-start" }}>
-      <Sidebar stage={stage} scanning={scanning} onNavigate={navigate} onSignOut={signOut} account={auth} health={health} />
+      <Sidebar stage={stage} scanning={scanning} runningCount={runningScans.length} onNavigate={navigate} onSignOut={signOut} account={auth} health={health} />
 
       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", minHeight: "100vh" }}>
         <TopBar stage={stage} server={server} scanning={scanning} account={auth} scanFlow={scanFlow} onStep={go} />
@@ -131,14 +207,7 @@ export default function App() {
           {stage === "discover" && <DiscoverScreen onSelect={selectServer} />}
           {stage === "static" && <StaticScanScreen />}
           {stage === "configure" && server && <ConfigureScreen server={server} onBack={() => go("discover")} onLaunch={launch} />}
-          {stage === "progress" && (scanning && scan
-            ? <ProgressScreen
-                scan={scan}
-                onComplete={finishScan}
-                onBack={() => { setScanning(false); setScan(null); go("discover"); }}
-                onViewResults={() => { setScanning(false); setScan(null); go("results"); }}
-              />
-            : <ActiveScanIdle onPick={() => { setServer(null); go("discover"); }} />)}
+          {stage === "progress" && renderProgress()}
           {stage === "results" && <ResultsListScreen onOpen={openReport} />}
           {stage === "report" && <ResultsScreen heroStyle={HERO_STYLE} session={session} onNewScan={() => { setServer(null); go("dashboard"); }} />}
           {stage === "findings" && <FindingsScreen />}

@@ -43,7 +43,7 @@
 | R6: 안정성 | ✅ 동작 | 크래시·타임아웃·에러율 탐지 |
 | EventStore (JSONL) | ✅ 동작 | 모든 이벤트 append-only 기록, 재분석 가능 |
 | 상관관계 엔진 | ✅ 동작 | 크로스-스캐너 인과관계 링크 |
-| 점수화 + JSON export | ✅ 동작 | per-risk 정규화 점수, verdict (REJECT/CONDITIONAL/APPROVE) |
+| 점수화 + JSON export | ✅ 동작 | per-risk 정규화 점수 + (Impact × Evidence) 모델의 verdict (REJECT/PASS/ERROR). 레거시 스코어러의 REJECT/CONDITIONAL/APPROVE는 `legacy_verdict`로 병기 |
 | Markdown 리포트 | ✅ 동작 | `report.md` 자동 생성 |
 | 재분석 CLI | ✅ 동작 | `analyze --session` 으로 기존 데이터에 새 스캐너 적용 |
 
@@ -65,6 +65,10 @@
 > **결론**: `--no-docker` 모드로 R3·R5·R4·R6·Chain Attack을 즉시 실행할 수 있음.
 > R1·R2의 OS 레벨 탐지는 Docker + `mcp-sandbox` 이미지 빌드 후 사용 가능.
 > postgres-mcp 같은 백엔드 의존 서버는 Docker 모드에서 사이드카가 자동으로 뜨고 user의 prod 자격증명은 사이드카로 강제 우회됨.
+>
+> **동시 스캔 안전**: 백엔드는 여러 스캔을 동시에 돌려도 안전합니다 — 세션 귀속이 결정적이고(각 스캔의
+> 자체 session_id 기준), HTTP-transport 컨테이너는 스캔마다 FREE 호스트 포트를 publish하며, 사이드카
+> 네트워크/컨테이너 이름도 스캔마다 고유합니다.
 
 ---
 
@@ -516,12 +520,17 @@ mcp-dynamic-analyzer scan --target <name>
             │   ├── R3 인젝션 ↔ R1 데이터 유출 → 인과 링크
             │   └── 중복 finding 병합 (동일 tool + 동일 위험 유형)
             │
-            ├── [12] Scorer.score()
+            ├── [12] Scorer.score()  (레거시 per-risk 점수, 리스크 바 표시용)
             │   ├── per-risk score = min(Σ(severity_weight × confidence) / 2.0, 1.0)
             │   ├── overall = max(per-risk scores)
-            │   ├── verdict: ≥0.75 → REJECT, ≥0.4 → CONDITIONAL, else APPROVE
-            │   └── 단, "coverage incomplete" caveat finding이 있으면 APPROVE → CONDITIONAL
-            │        (부분 스캔은 깨끗한 APPROVE로 안 보이게)
+            │   └── legacy verdict: ≥0.75 → REJECT, ≥0.4 → CONDITIONAL, else APPROVE
+            │        (findings.json의 metadata.legacy_verdict로 병기, 헤드라인 verdict는 아님)
+            ├── [12b] verdict.evaluate(findings, coverage_ok, memory_corruption_crash, error_message)
+            │   ├── REJECT ⇔ strong-evidence C/I compromise(TAKEOVER/PARTIAL_CI) 존재
+            │   ├── coverage 불가(tool 0개 또는 시퀀스 중단 / coverage_incomplete caveat) → ERROR(검사 불가)
+            │   ├── 그 외 → PASS (warnings breakdown 동반)
+            │   └── 메모리-안전 크래시 시그널(SIGSEGV/SIGABRT/SIGBUS, 음수 returncode)이면
+            │        WARN_MEMORY_CORRUPTION 경고 추가 (Docker에선 컨테이너 returncode라 주로 --no-docker에서 신뢰)
             │
             └── [13] 출력
                 ├── results/{session_id}/events.jsonl  ← 모든 원시 이벤트
@@ -629,6 +638,10 @@ EOF
 
 mcp-dynamic-analyzer scan --target filesystem --config my-scan.yaml
 ```
+> **`--command` / `--arg` / `--timeout`**: `--target`로 발견된 서버를 고르는 대신 실행 커맨드를 직접 줄 수 있습니다
+> (`scan --command npx --arg chrome-devtools-mcp@latest`). `--arg`는 반복 가능. `--timeout <초>`는
+> `sandbox.timeout`을 오버라이드합니다. (이 플래그들은 통합 `minos scan`/`minos dynamic` 진입점 기준.)
+
 
 ### 4. 이전 세션 재분석
 
@@ -1268,11 +1281,21 @@ R1·R2·R4·R6 비활성화, R5 fuzz_rounds=3, timeout=60초. 빠른 초기 검�
     "R4": 0.0, "R5": 0.5, "R6": 0.0
   },
   "metadata": {
-    "duration_sec": 0,
+    "duration_sec": 12.4,
     "tools_tested": 5,
     "total_events": 342,
     "overall_score": 0.75,
-    "verdict": "REJECT"
+    "verdict": "REJECT",
+    "verdict_detail": {
+      "decision": "REJECT",
+      "reasons": [{"reason": "data-access", "kind": "r1.sensitive_read", "finding_id": "fnd-..."}],
+      "warnings": {"availability/stability": 1},
+      "max_residual_severity": "MEDIUM",
+      "coverage_ok": true,
+      "error_code": null,
+      "error_message": null
+    },
+    "legacy_verdict": "REJECT"
   }
 }
 ```
@@ -1281,7 +1304,7 @@ R1·R2·R4·R6 비활성화, R5 fuzz_rounds=3, timeout=60초. 빠른 초기 검�
 
 ```
 # MCP Dynamic Analyzer — Security Report
-## Verdict          ← REJECT / CONDITIONAL / APPROVE + 점수
+## Verdict          ← REJECT / PASS / ERROR(검사 불가) + reasons/warnings (레거시 점수는 legacy_verdict로 병기)
 ## Risk Score Summary  ← R1~R6 점수 테이블
 ## Severity Breakdown  ← CRITICAL/HIGH/MEDIUM/LOW/INFO 카운트
 ## Scan Metadata
@@ -1330,7 +1353,7 @@ R1·R2·R4·R6 비활성화, R5 fuzz_rounds=3, timeout=60초. 빠른 초기 검�
 | 런타임 자가 복구 (누락 구성요소) | `infrastructure/sandbox.py` (`_retry_bootstrap_from_stderr`, `_apt_bootstrap_action`), `orchestrator.py` (`_detect_missing_prerequisite`), `payloads/stability.py` (`looks_like_missing_prerequisite`) | ✅ 두 트리거 — ① 기동 즉시 종료 → stderr 분석 → 같은 sandbox 안에서 1회 재시도. ② collection 후 tool 응답 다수가 "no Chrome"/"No module named X"/"command not found" → 그 텍스트를 `prereq_hint`로 새 sandbox에 전달 → recipe `stderr_tokens_any` + apt heuristic(curated 맵 + libY.so.N + best-effort 추론, best-effort는 `|| true`)으로 재해결 → 이미지 rebuild → collection 1회 재실행. 그래도 안 되면 `prerequisite_missing` 이벤트 → R6가 LOW "Scan coverage incomplete — needs X" finding으로 변환 (스캔은 항상 완료, 절대 "실패"로 안 띄움). (`prereq_retry_done` / `prereq_outcome_recorded`로 1회 제한) |
 | **백엔드 사이드카** | `infrastructure/sandbox.py` (`_start_sidecars` 등) | ✅ postgres / mysql / mongo / redis recipe 내장. `--internal` private network. arg/env redirect. 사이드카 IP를 R1 trust set으로 전파 |
 | stdio 인터셉터 | `protocol/interceptor.py` | ✅ |
-| HTTP/SSE 인터셉터 | `protocol/http_interceptor.py` | ✅ (미통합) |
+| HTTP/SSE 인터셉터 | `protocol/http_interceptor.py` | ✅ 오케스트레이터 통합 (`_create_interceptor`가 `server.transport == "http"`이면 HttpInterceptor 사용). Docker 모드는 스캔마다 FREE 호스트 포트를 동적 publish(고정 포트 충돌 방지) |
 | MCP 테스트 클라이언트 | `protocol/client.py` | ✅ |
 | 시퀀서 + 에러 격리 + circuit breaker | `protocol/sequencer.py`, `scanners/r5_*`, `r6_*` | ✅ (tool, category)당 첫 timeout으로 카테고리 단축. R5 30s / R6 15s 콜 타임아웃 |
 | 크래시 복구 (재시작 + 카테고리 스킵) | `orchestrator.py`, `protocol/sequencer.py`, `scanners/r5_*`, `r6_*` | ✅ `ServerCrashError` 시 재시작(≤3) + 크래시 category를 모든 시퀀스의 `skip_categories`에 주입 → 같은 페이로드 재실행 안 함. `server_crash` 이벤트에 `(tool, category)` 기록 |
@@ -1355,7 +1378,8 @@ R1·R2·R4·R6 비활성화, R5 fuzz_rounds=3, timeout=60초. 빠른 초기 검�
 | **Strict JSON wire** | `protocol/interceptor.py` (`allow_nan=False` + `ClientSerializationError`) | ✅ `Infinity`/`NaN` 같은 비표준 JSON 리터럴을 wire 직전에 차단해서 phantom timeout FP 원천 봉쇄 |
 | 페이로드 카탈로그 | `payloads/{rce,ssrf,nosql_injection,stability,tool_poisoning,behavior_drift,resource_poisoning,...}.py` | ✅ R2/R5/R6/R3용 카테고리별 모듈 — [§퍼징 페이로드 카탈로그](#퍼징-페이로드-카탈로그) 참조 |
 | 상관관계 엔진 | `correlation/engine.py` | ✅ R5↔R2, R5↔R1, R3↔R1/R2 페어. 5초 윈도우 |
-| 점수화 | `output/scorer.py` | ✅ per-risk normalised + max-aggregation. ≥0.75 REJECT, ≥0.4 CONDITIONAL. "coverage incomplete" caveat finding 있으면 APPROVE→CONDITIONAL 다운그레이드 (부분 스캔은 깨끗한 APPROVE로 안 보이게) |
+| 점수화 (레거시) | `output/scorer.py` | ✅ per-risk normalised + max-aggregation. ≥0.75 REJECT, ≥0.4 CONDITIONAL — 이제 헤드라인 verdict가 아니라 리스크 바 + `legacy_verdict`로만 사용 |
+| **Verdict (Impact × Evidence)** | `output/verdict.py` (`evaluate`) | ✅ 바이너리 REJECT/PASS + 별도 ERROR(검사 불가). strong-evidence C/I compromise면 REJECT, coverage 불가(tool 0개·시퀀스 중단·coverage_incomplete caveat)면 ERROR, 그 외 PASS. 메모리-안전 크래시(SIGSEGV/SIGABRT/SIGBUS)면 WARN_MEMORY_CORRUPTION 경고. findings.json의 `metadata.verdict`(decision) + `verdict_detail`로 영속 |
 | JSON export | `output/exporter.py` | ✅ |
 | Markdown 리포트 | `output/reporter.py` | ✅ |
 
@@ -1364,9 +1388,9 @@ R1·R2·R4·R6 비활성화, R5 fuzz_rounds=3, timeout=60초. 빠른 초기 검�
 | 항목 | 설명 |
 |---|---|
 | psutil 백엔드 read/write 추적 | psutil 폴링은 file_open/exec/connect만 가능, file_read/write는 syscall-level 추적 필요 (Linux+strace 또는 Docker 사용 권장) |
-| HTTP/SSE 서버 지원 | `http_interceptor.py` 구현됐으나 오케스트레이터에 미연결 |
+| HTTP/SSE 서버 지원 | 오케스트레이터 통합 완료 (`_create_interceptor`). CLI에 전용 플래그는 아직 없음 — config의 `server.transport: http` + `http_port`로 지정 |
 | 스캐너 테스트 | `tests/test_scanners/test_all_scanners.py`에 R1~R6·chain 통합; 파일별 분리는 선택 |
-| `duration_sec` 측정 | 현재 0으로 고정 |
+| (없음) | `duration_sec`은 이제 실제 측정값 (`time.monotonic()` 시작/종료 차) |
 
 ---
 

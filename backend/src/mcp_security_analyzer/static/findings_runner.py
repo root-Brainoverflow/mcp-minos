@@ -47,6 +47,9 @@ class StaticReport:
     tool_source: str
     scanners_run: tuple[str, ...]
     scanners_skipped: tuple[str, ...] = field(default_factory=tuple)
+    # Source-extracted tool defs, kept so a caller can run the runtime-drift
+    # check (metadata_divergence) later, after the dynamic tools/list arrives.
+    source_tools: tuple[ToolInfo, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict:
         return {
@@ -62,8 +65,17 @@ def run_static_findings(
     snapshot: EnvironmentSnapshot,
     *,
     runtime_tools: list[ToolInfo] | None = None,
+    include_divergence: bool = True,
 ) -> StaticReport:
-    """Run every applicable static scanner and collect their findings."""
+    """Run every applicable static scanner and collect their findings.
+
+    Source-tree scanners (manifest, semgrep) + the description/schema audits run
+    purely on the extracted source, so they can run *before* the dynamic phase
+    (the documented tarball → static → dynamic order). The source↔runtime
+    metadata-divergence (rug-pull) check needs the runtime ``tools/list`` and is
+    skipped when ``include_divergence`` is False — the caller re-runs just that
+    one after the dynamic phase via ``scan_metadata_divergence``.
+    """
     findings: list[StaticFinding] = []
     scanners_run: list[str] = []
     scanners_skipped: list[str] = []
@@ -115,7 +127,7 @@ def run_static_findings(
     # Only meaningful when BOTH channels of evidence are present. Reports
     # tools missing on either side and description content / length mismatches
     # as low-confidence R4 signals.
-    if source_tools and runtime_tools:
+    if include_divergence and source_tools and runtime_tools:
         findings.extend(scan_metadata_divergence(source_tools, runtime_tools))
         scanners_run.append("metadata_divergence")
     else:
@@ -137,4 +149,5 @@ def run_static_findings(
         tool_source=tool_source,
         scanners_run=tuple(scanners_run),
         scanners_skipped=tuple(scanners_skipped),
+        source_tools=tuple(source_tools),
     )

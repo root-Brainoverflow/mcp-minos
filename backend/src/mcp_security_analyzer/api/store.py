@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import sys
 from datetime import UTC, datetime
@@ -585,7 +586,16 @@ def _session_at(session_dir: Path, data: dict[str, Any]) -> str:
     return da or _first_event_ts(session_dir) or ""
 
 
-_RECORDS_CACHE: dict[str, Any] = {"key": None, "value": []}
+# (fingerprint, records) cached as ONE tuple and swapped atomically — a single
+# binding assignment is atomic in CPython, so a read on the FastAPI threadpool
+# (sync read endpoints run on real OS threads) never sees a torn key/value mix
+# while a scan task invalidates it. None = empty/invalidated.
+_RECORDS_CACHE: tuple[tuple, list[dict[str, Any]]] | None = None
+
+
+def _invalidate_records_cache() -> None:
+    global _RECORDS_CACHE
+    _RECORDS_CACHE = None
 
 
 def _records_key() -> tuple:
@@ -608,9 +618,11 @@ def _real_records() -> list[dict[str, Any]]:
     fans out to several endpoints) don't re-read; a new or changed scan
     invalidates the cache automatically.
     """
+    global _RECORDS_CACHE
     key = _records_key()
-    if _RECORDS_CACHE["key"] == key:
-        return _RECORDS_CACHE["value"]
+    cached = _RECORDS_CACHE  # one atomic read of the binding
+    if cached is not None and cached[0] == key:
+        return cached[1]
     src_map = _server_source_map()
     recs: list[dict[str, Any]] = []
     for d in _list_result_dirs():
@@ -633,8 +645,7 @@ def _real_records() -> list[dict[str, Any]]:
             }
         )
     recs.sort(key=lambda r: r["at"], reverse=True)
-    _RECORDS_CACHE["key"] = key
-    _RECORDS_CACHE["value"] = recs
+    _RECORDS_CACHE = (key, recs)  # one atomic write
     return recs
 
 
@@ -865,7 +876,8 @@ def _minos_bin() -> str:
 
 
 def _build_cmd(  # noqa: PLR0913
-    profile: str, name: str | None, command: str | None, args: list[str], use_docker: bool
+    profile: str, name: str | None, command: str | None, args: list[str], use_docker: bool,
+    timeout: int | None = None,
 ) -> list[str]:
     """Build the minos CLI command for a given profile.
 
@@ -888,8 +900,12 @@ def _build_cmd(  # noqa: PLR0913
         parts = [minos, "static", "--format", "json"]
     elif profile == "quick":
         parts = [minos, "dynamic", "--quick"]
+    elif profile == "scan":
+        # Full pre-deploy gate = static + dynamic (minos scan), now that
+        # `minos scan` accepts --command/--arg as well as --target.
+        parts = [minos, "scan"]
     else:
-        # "scan" or "dynamic" → use minos dynamic (creates results/)
+        # "dynamic" → runtime sandbox only (no static scanners)
         parts = [minos, "dynamic"]
 
     # Target resolution: prefer discovered name (works with all profiles that
@@ -907,6 +923,10 @@ def _build_cmd(  # noqa: PLR0913
 
     if not use_docker and profile != "static":
         parts.append("--no-docker")
+
+    # static analysis has no sandbox budget; only dynamic/scan/quick honour it.
+    if timeout is not None and profile != "static":
+        parts += ["--timeout", str(timeout)]
 
     return parts
 
@@ -1069,6 +1089,7 @@ async def start_scan(
     profile: str,
     use_docker: bool,
     name: str | None = None,
+    timeout: int | None = None,
 ) -> str:
     """Spawn the appropriate minos command and return a scan_id.
 
@@ -1089,7 +1110,7 @@ async def start_scan(
         "eta_sec": estimate_eta(profile),
     }
 
-    cmd_parts = _build_cmd(profile, name, command, args, use_docker)
+    cmd_parts = _build_cmd(profile, name, command, args, use_docker, timeout)
     log.info("api.scan.start", scan_id=scan_id, cmd=" ".join(cmd_parts))
 
     try:
@@ -1107,6 +1128,28 @@ async def start_scan(
         log.error("api.scan.launch_failed", scan_id=scan_id, error=str(exc))
 
     return scan_id
+
+
+# ses-<uuid> as emitted by minos (orchestrator.collection.start / done). ANSI is
+# stripped first so structlog colour codes around the value don't break the match.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_SESSION_RE = re.compile(
+    r"ses-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+)
+
+
+def _session_id_from_lines(lines: list[str]) -> str | None:
+    """Extract THIS scan's own full session id from its minos stderr.
+
+    Deterministic per-subprocess — each scan's log only carries its own
+    session_id — so it replaces the old "diff the shared results/ listing"
+    heuristic that mis-attributed directories when scans ran concurrently.
+    """
+    for ln in reversed(lines):  # last occurrence = orchestrator.done
+        m = _SESSION_RE.search(_ANSI_RE.sub("", ln))
+        if m:
+            return m.group(0)
+    return None
 
 
 async def _run_scan(scan_id: str, proc: asyncio.subprocess.Process) -> None:
@@ -1134,14 +1177,17 @@ async def _run_scan(scan_id: str, proc: asyncio.subprocess.Process) -> None:
     entry["status"] = "done" if rc == 0 else "error"
     log.info("api.scan.finished", scan_id=scan_id, rc=rc)
 
-    # Find a newly created session directory.
+    # Attribute the session deterministically from THIS subprocess's own stderr
+    # (minos logs ``session_id=ses-…``), not by diffing the shared results/
+    # listing — the old diff mis-attributed directories when scans ran
+    # concurrently (two scans could latch onto the same/other scan's dir).
     new_dir: Path | None = None
-    for d in _list_result_dirs():
-        if d.name not in entry["started_dirs"]:
-            new_dir = d
-            entry["session_id"] = _short_id(d.name)
-            log.info("api.scan.session_detected", scan_id=scan_id, session=entry["session_id"])
-            break
+    full_id = _session_id_from_lines(entry["lines"])
+    if full_id:
+        entry["session_id"] = _short_id(full_id)
+        candidate = results_dir() / full_id
+        new_dir = candidate if candidate.is_dir() else None
+        log.info("api.scan.session_detected", scan_id=scan_id, session=entry["session_id"])
 
     # Record the friendly discovered name into the session so the report shows
     # it (minos writes server.name = the launcher command, e.g. "npx").
@@ -1160,7 +1206,7 @@ async def _run_scan(scan_id: str, proc: asyncio.subprocess.Process) -> None:
             log.info("api.scan.static_session_saved", scan_id=scan_id, session=saved)
 
     # Invalidate the records cache so the results list picks up the new session.
-    _RECORDS_CACHE["key"] = None
+    _invalidate_records_cache()
 
 
 def get_scan(scan_id: str) -> dict[str, Any] | None:

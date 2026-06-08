@@ -212,8 +212,15 @@ _TYPE_MAP: dict[str, str] = {
     "connect": "network_connect",
 }
 
+# strace is invoked with ``-f -t -T`` (see StraceBackend._build_cmd), so a line
+# looks like ``[pid 1234] 12:34:56 openat(AT_FDCWD, "/x", O_RDONLY) = 3 <0.00004>``.
+# Tolerate the optional ``[pid N]`` follow-child prefix and the optional
+# timestamp (``HH:MM:SS`` from -t, epoch from -ttt, or a bare pid), then capture
+# ``syscall(args) = ret``. (The previous ``^[\d.]+\s+`` required a decimal
+# timestamp at column 0 and never matched the -t/-f output → zero events.)
 _LINE_RE = re.compile(
-    r"^(?P<ts>[\d.]+)\s+"
+    r"^(?:\[pid\s*\d+\]\s*)?"   # optional "-f" child prefix
+    r"(?:[\d:.]+\s+)?"           # optional timestamp / pid token
     r"(?P<syscall>\w+)\("
     r"(?P<args>.*?)\)"
     r"\s*=\s*(?P<ret>-?\d+|0x[0-9a-f]+|\?)",
@@ -318,12 +325,17 @@ def _parse_strace_line(line: str, session_id: str) -> Event | None:
     data: dict[str, Any] = {"syscall": syscall, "return": ret, "raw": line[:500]}
 
     quoted = _QUOTED_RE.findall(args_str)
-    if quoted:
+    # Only open/openat carry a real path as their first quoted arg. For read/write
+    # the first quoted token is the DATA BUFFER, not a path — putting it in
+    # `path` made the R1 scanner flag file contents (e.g. JS source mentioning
+    # "credentials") as sensitive-path access. execve → executable, connect →
+    # address; reads/writes carry no path (the fd is not a filename).
+    if syscall in ("open", "openat") and quoted:
         data["path"] = quoted[0]
-    if syscall == "execve" and quoted:
+    elif syscall == "execve" and quoted:
         data["executable"] = quoted[0]
         data["argv"] = quoted[1:] if len(quoted) > 1 else []
-    if syscall == "connect":
+    elif syscall == "connect":
         data["address"] = args_str[:200]
 
     return Event(session_id=session_id, source="syscall", type=evt_type, data=data)

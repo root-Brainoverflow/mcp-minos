@@ -36,6 +36,19 @@ _SHELLS = {"sh", "bash", "zsh", "dash", "csh", "fish", "cmd", "cmd.exe", "powers
 _INSTALLERS = {"pip", "pip3", "npm", "npx", "yarn", "curl", "wget", "gem", "cargo"}
 _DANGEROUS = _SHELLS | _INSTALLERS | {"python", "python3", "node", "perl", "ruby", "php"}
 
+# Executables belonging to the package runtime / bootstrap, not the server's own
+# behaviour. With strace -f the whole npx→npm→node→server process tree is traced,
+# so npm's own `sh -c`, node, npm-cli, etc. would otherwise read as the server
+# spawning shells. Anything under the runtime install dirs is skipped.
+_RUNTIME_EXE_MARKERS = (
+    "node_modules", "/.npm", "/npm/", "site-packages",
+    "/usr/lib/node", "/usr/local/lib/node", "/.bin/",
+)
+
+
+def _is_runtime_exe(exe: str) -> bool:
+    return any(m in exe.lower() for m in _RUNTIME_EXE_MARKERS)
+
 
 class R2CodeExecScanner(BaseScanner):
     @property
@@ -58,10 +71,20 @@ class R2CodeExecScanner(BaseScanner):
         async for evt in reader.events_by_type("test_input"):
             fuzz_events.append(evt)
 
-        # Syscall-level analysis.
+        # Syscall-level analysis. Two guards keep this from firing on the package
+        # runtime's own bootstrap (which strace -f also traces): skip executables
+        # under the runtime install dirs, and require the execve to be CORRELATED
+        # to a fuzz/tool input — an exec triggered by our payload is the actual
+        # R2 signal, whereas npm/npx/node spawning shells at startup is not.
         for evt in exec_events:
             exe = _executable(evt)
             base = exe.rsplit("/", 1)[-1].lower() if exe else ""
+
+            if _is_runtime_exe(exe):
+                continue
+            correlated = _find_preceding_fuzz(evt, fuzz_events)
+            if correlated is None:
+                continue
 
             if base in _SHELLS:
                 findings.append(Finding(
@@ -69,10 +92,13 @@ class R2CodeExecScanner(BaseScanner):
                     severity=Severity.HIGH,
                     confidence=0.85,
                     kind="r2.shell_exec",
-                    title=f"Shell execution detected: {exe}",
-                    description=f"Server spawned shell '{exe}'. argv: {evt.data.get('argv', [])}",
-                    related_events=[evt.event_id],
-                    reproduction="Monitor execve syscalls during server execution",
+                    title=f"Shell execution from tool input: {exe}",
+                    description=(
+                        f"Server spawned shell '{exe}' within 5 s of a fuzzing payload "
+                        f"(argv: {evt.data.get('argv', [])}) — input reached a shell."
+                    ),
+                    related_events=[evt.event_id, correlated.event_id],
+                    reproduction="Send the correlated payload and monitor execve",
                 ))
 
             elif base in _INSTALLERS:
@@ -81,28 +107,29 @@ class R2CodeExecScanner(BaseScanner):
                     severity=Severity.CRITICAL,
                     confidence=0.9,
                     kind="r2.installer_exec",
-                    title=f"Package installer execution: {exe}",
-                    description=f"Server ran installer '{exe}', potentially downloading malicious code.",
-                    related_events=[evt.event_id],
-                    reproduction="Monitor execve for package manager invocations",
+                    title=f"Package installer execution from tool input: {exe}",
+                    description=(
+                        f"Server ran installer '{exe}' within 5 s of a fuzzing payload, "
+                        f"potentially fetching/executing attacker code."
+                    ),
+                    related_events=[evt.event_id, correlated.event_id],
+                    reproduction="Send the correlated payload and monitor execve",
                 ))
 
             elif base in _DANGEROUS:
-                correlated = _find_preceding_fuzz(evt, fuzz_events)
-                if correlated:
-                    findings.append(Finding(
-                        risk_type=RiskType.R2,
-                        severity=Severity.CRITICAL,
-                        confidence=0.9,
-                        kind="r2.cmd_injection_exec",
-                        title=f"Command injection → exec: {exe}",
-                        description=(
-                            f"execve('{exe}') occurred within 5 s of a fuzzing payload, "
-                            f"suggesting successful command injection."
-                        ),
-                        related_events=[evt.event_id, correlated.event_id],
-                        reproduction="Send command-injection payload and monitor execve",
-                    ))
+                findings.append(Finding(
+                    risk_type=RiskType.R2,
+                    severity=Severity.CRITICAL,
+                    confidence=0.9,
+                    kind="r2.cmd_injection_exec",
+                    title=f"Command injection → exec: {exe}",
+                    description=(
+                        f"execve('{exe}') occurred within 5 s of a fuzzing payload, "
+                        f"suggesting successful command injection."
+                    ),
+                    related_events=[evt.event_id, correlated.event_id],
+                    reproduction="Send command-injection payload and monitor execve",
+                ))
 
         # Response-text analysis — RCE output in fuzz results.
         findings.extend(await self._check_rce_responses(ctx))

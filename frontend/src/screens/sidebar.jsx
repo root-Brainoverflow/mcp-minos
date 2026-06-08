@@ -99,7 +99,7 @@ const NAV_ITEMS = [
   { id: "settings",  label: "Settings",      icon: IconSettings, stages: ["settings"] },
 ];
 
-function NavItem({ item, active, live, onClick }) {
+function NavItem({ item, active, live, count = 0, onClick }) {
   const [hover, setHover] = useState(false);
   const Icon = item.icon;
   return (
@@ -119,7 +119,14 @@ function NavItem({ item, active, live, onClick }) {
       <span style={{ fontSize: 13.5, fontWeight: active ? 600 : 500, letterSpacing: "-0.005em" }}>{t(`nav.${item.id}`)}</span>
       {live && (
         <span style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6 }}>
-          <span style={{ fontFamily: "var(--mono)", fontSize: 9.5, fontWeight: 600, color: "var(--orange)", letterSpacing: "0.04em" }}>{t("nav.live")}</span>
+          {count > 1 ? (
+            <span style={{
+              fontFamily: "var(--mono)", fontSize: 10, fontWeight: 700, color: "#fbfbfa", background: "var(--orange)",
+              minWidth: 16, height: 16, borderRadius: 999, display: "inline-flex", alignItems: "center", justifyContent: "center", padding: "0 4px",
+            }}>{count}</span>
+          ) : (
+            <span style={{ fontFamily: "var(--mono)", fontSize: 9.5, fontWeight: 600, color: "var(--orange)", letterSpacing: "0.04em" }}>{t("nav.live")}</span>
+          )}
           <span style={{ width: 7, height: 7, borderRadius: 999, background: "var(--orange)", animation: "mn-pulse 1.2s infinite" }} />
         </span>
       )}
@@ -127,7 +134,7 @@ function NavItem({ item, active, live, onClick }) {
   );
 }
 
-export function Sidebar({ stage, scanning, onNavigate, onSignOut, account, health }) {
+export function Sidebar({ stage, scanning, runningCount = 0, onNavigate, onSignOut, account, health }) {
   const role = roleOf(account);
   const rm = ROLE_META[role];
   const handle = handleOf(account);
@@ -154,6 +161,7 @@ export function Sidebar({ stage, scanning, onNavigate, onSignOut, account, healt
           <NavItem key={item.id} item={item}
             active={item.stages.includes(stage)}
             live={item.id === "progress" && scanning}
+            count={item.id === "progress" ? runningCount : 0}
             onClick={() => onNavigate(item.id)} />
         ))}
       </nav>

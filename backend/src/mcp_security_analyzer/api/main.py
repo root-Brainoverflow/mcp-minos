@@ -27,6 +27,7 @@ class ScanRequest(BaseModel):
     args: list[str] = []
     profile: str = "scan"
     docker: bool = True
+    timeout: int | None = None   # sandbox scan-budget ceiling (s); heavy servers need more
 
 
 def _cors_origins() -> list[str]:
@@ -111,6 +112,7 @@ def create_app() -> FastAPI:
             profile=req.profile,
             use_docker=req.docker,
             name=req.name,
+            timeout=req.timeout,
         )
         entry = store.get_scan(scan_id) or {}
         return {"scan_id": scan_id, "eta_sec": entry.get("eta_sec")}

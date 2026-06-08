@@ -6,8 +6,10 @@
 > [output/verdict.py](../src/mcp_security_analyzer/dynamic/output/verdict.py)가 구현됐으며, 모든 스캐너
 > (동적 7 + 정적 5)가 `kind`를 태깅한다. `verdict.evaluate()`가 orchestrator/CLI에 배선되어 REJECT/PASS/ERROR를 산출한다.
 > 테스트: `tests/test_verdict_model.py`(코어) + `tests/test_scan_demo.py`(실제 스캐너 end-to-end).
-> **미완:** 레거시 [scorer.py](../src/mcp_security_analyzer/dynamic/output/scorer.py)(per-risk 점수 표)는 표시용으로 병존 중이고,
-> §8.3 메모리손상 크래시 분류는 `server_crash` 이벤트에 OS signal이 없어 보류(§11).
+> **상태 갱신:** §8.3 메모리손상 크래시 분류는 **구현됨** — `verdict.is_memory_corruption_signal()`이 크래시 프로세스의
+> 음수 returncode(=-signum, SIGSEGV/SIGABRT/SIGBUS)로 식별하고 orchestrator `_collect`가 이를 모아 `evaluate(..., memory_corruption_crash=…)`로 넘긴다.
+> §4.4 비가시 유니코드 2분할도 **구현됨**(`descriptions._find_invisible` → `r3.invisible_unicode_bidi`/`r3.invisible_unicode_zw`).
+> **미완:** 레거시 [scorer.py](../src/mcp_security_analyzer/dynamic/output/scorer.py)(per-risk 점수 표)는 표시용으로 병존 중이다.
 
 이 문서는 `mcp-security-analyzer`가 하나의 finding에 **심각도(severity)** 를 부여하고,
 finding 집합으로부터 서버 단위 **최종 판정(verdict)** 을 도출하는 로직을 절차 단위로 기술한다.
@@ -143,14 +145,15 @@ Finding은 스캐너가 만들지만, **분류 좌표와 severity는 파이프�
 // → §8.1 적용: (PARTIAL_CI ∧ REALIZED) 성립 → 서버 verdict = REJECT (사유 data-access)
 ```
 
-### 2.4 현재 코드(models.py)와의 차이
+### 2.4 모델 필드 현황 (models.py)
 
-현재 `Finding`([models.py:83-95](../src/mcp_security_analyzer/dynamic/models.py#L83-L95))은
-`finding_id, risk_type, severity, confidence, title, description, related_events, tool_name, reproduction, detected_at`만 갖는다. 목표 모델은:
+현재 `Finding`([models.py:108-129](../src/mcp_security_analyzer/dynamic/models.py#L108-L129))은
+`finding_id, risk_type, severity, confidence, title, description, related_events, tool_name, reproduction, detected_at`에
+더해 분류 좌표 필드 `kind`, `impact`, `evidence`를 **이미 갖는다**(셋 다 `| None` 옵션). 의미 정리:
 
-- **신규 필드 3개**: `kind`, `impact`, `evidence`.
-- `**severity` 의미 변화**: 현재는 스캐너가 직접 주입하는 **입력** → 목표는 `(impact, evidence)`에서 나오는 **파생값**.
-- `**confidence` 의미 명확화**: 판정 입력이 아니라 **표시 전용**(§6).
+- **분류 필드 3개**: `kind`, `impact`, `evidence` — `Impact`/`Evidence` enum도 models.py에 정의됨.
+- `**severity` 의미**: `impact`/`evidence`가 채워지면 verdict 엔진이 스캐너가 넣은 `severity`를 무시하고 §5 LUT로 재계산한다.
+- `**confidence` 의미**: 판정 입력이 아니라 **표시 전용**(§6).
 
 마이그레이션 범위(스캐너 12개 + correlation 엔진)는 §11 참조.
 
@@ -241,7 +244,7 @@ finding의 `related_events` 소스가 **실제 동작 관찰**이면 `REALIZED`�
 3. **툴 description의 실행형 비가시 유니코드** — **bidi override / tag block** 문자.
   (단순 zero-width 1개는 i18n·이모지에 정상 출현 → §4.4로 `POTENTIAL` 강등)
 
-### 4.4 비가시 유니코드 세부 규칙 (적용해야 할 변경)
+### 4.4 비가시 유니코드 세부 규칙 (구현됨)
 
 **배경:** MCP tool의 설명문(description)은 그대로 LLM 컨텍스트로 들어간다. 공격자는 사람 눈에는 안 보이지만 LLM은
 읽는 **비가시 유니코드**에 악성 지시를 숨길 수 있다(R3 tool poisoning). 그런데 비가시 문자는 **오탐 위험이 정반대인 두 종류**다:
@@ -253,9 +256,11 @@ finding의 `related_events` 소스가 **실제 동작 관찰**이면 `REALIZED`�
 
 둘 다 Impact는 `TAKEOVER`(숨은 지시가 먹히면 에이전트를 통해 임의 행동 유도)지만, **evidence가 갈려** 결과가 달라진다.
 
-> **변경 필요:** 현재 코드는 `_find_invisible`([descriptions.py:395-406](../src/mcp_security_analyzer/static/scanners/descriptions.py#L395-L406))이
-> zero-width와 bidi/tag를 **하나로 묶어** 단일 `Severity.CRITICAL`을 낸다([descriptions.py:297](../src/mcp_security_analyzer/static/scanners/descriptions.py#L297)).
-> 그대로면 **이모지의 zero-width 하나만 있어도 CRITICAL→REJECT**가 되어 멀쩡한 서버를 오탐 차단한다. 아래처럼 **두 갈래로 분리**해야 한다.
+> **구현됨:** `_find_invisible`([descriptions.py:408-427](../src/mcp_security_analyzer/static/scanners/descriptions.py#L408-L427))이
+> `(deterministic, zero_width)` 두 목록을 반환하고, 발화 시 deterministic 문자가 있으면 `kind=r3.invisible_unicode_bidi`(DETERMINISTIC),
+> 없고 zero-width만이면 `kind=r3.invisible_unicode_zw`(POTENTIAL)로 태깅한다([descriptions.py:308](../src/mcp_security_analyzer/static/scanners/descriptions.py#L308)).
+> bidi/tag/기타 format·control 문자(`Cf`/`Cc`)는 deterministic, `_ZW_CHARS`는 zero-width로 분류된다.
+> (스캐너가 다는 `Severity.CRITICAL`은 표시용일 뿐 — verdict는 `kind`→카탈로그 `(impact, evidence)`로 재산출하므로 zw는 PASS+warn으로 떨어진다.)
 
 
 | 패턴                              | Impact   | Evidence      |
@@ -379,8 +384,9 @@ REJECT는 최우선 — coverage가 부분적이어도 확정된 REJECT는 유�
 ### 8.3 메모리 손상 의심 크래시 (경고 플래그)
 
 `server_crash`가 **SIGSEGV / SIGABRT / SIGBUS**(메모리 안전 결함)로 발생하면 RCE로 이어질 수 있는 신호다.
-깨끗한 예외/handled OOM과 구분하여 `potential-memory-corruption` **경고 플래그**를 달아 사람이 보게 한다
-(시그널/exit code는 sysmon `server_crash` 이벤트에서 식별). 단독으로 REJECT하지는 않으며, 위험 판정은 §8.1대로
+깨끗한 예외/handled OOM과 구분하여 `potential-memory-corruption` **경고 플래그**를 달아 사람이 보게 한다.
+식별은 크래시한 프로세스의 **음수 returncode(=-signum)**로 한다 — orchestrator `_collect`가 종료한 프로세스의 returncode가 음수면
+`crash_signals`에 모으고, `verdict.is_memory_corruption_signal()`([verdict.py:134](../src/mcp_security_analyzer/dynamic/output/verdict.py#L134), `{6,7,10,11}` = SIGABRT/SIGBUS/SIGSEGV)로 판정해 `evaluate(..., memory_corruption_crash=…)`에 넘긴다. (Docker 경로에서는 returncode가 **컨테이너**의 것이라 내부 서버 시그널을 반영하지 못하므로 주로 `--no-docker`에서 동작한다.) 단독으로 REJECT하지는 않으며, 위험 판정은 §8.1대로
 이진(REJECT/PASS)을 유지한다. 다만 그 크래시 때문에 **검사가 완료되지 못했다면** §8.4의 ERROR(검사 불가)가 된다.
 정밀한 exploitable-crash 판별(ASAN 등)은 v2(§12).
 
@@ -409,8 +415,8 @@ REJECT 조건(§8.1)이 성립하지 않으면서 **동적 검사가 의미 있�
 | **회복 못한 크래시** — 재시작 한도 초과로 시퀀스 미완 (또는 timeout/EOF) | False | **ERROR**(검사 불가) |
 
 `_collect`가 정상 완주에만 `scan_completed=True`를 반환하고 `run_analysis`가 이를 `coverage_ok`에 반영한다(구현됨).
-**REJECT는 아니다** — 가용성 DoS를 차단하면 malformed 입력에 죽는 정상 서버 다수가 reject되어 변별력이 사라진다(§8.2). 단,
-미래에 메모리손상 시그널(SIGSEGV/SIGABRT/SIGBUS)을 식별하면(§8.3) 그 크래시만은 RCE 가능성으로 **REJECT/검토** 쪽으로 간다.
+**REJECT는 아니다** — 가용성 DoS를 차단하면 malformed 입력에 죽는 정상 서버 다수가 reject되어 변별력이 사라진다(§8.2). 다만
+메모리손상 시그널(SIGSEGV/SIGABRT/SIGBUS)은 **이미 식별되어**(§8.3) `potential-memory-corruption` 경고 플래그가 붙는다(여전히 PASS — REJECT 승격은 v2, §12).
 
 > 구 `scorer.py`가 'coverage incomplete'를 APPROVE→CONDITIONAL로 강등하던 의도([scorer.py:27-34,69](../src/mcp_security_analyzer/dynamic/output/scorer.py#L27-L34))를
 > 계승하되, 본 모델에선 위험 등급이 아닌 **별도 ERROR**로 분리한다.
@@ -427,6 +433,7 @@ REJECT 조건(§8.1)이 성립하지 않으면서 **동적 검사가 의미 있�
 
 `Verdict { decision, reasons[], warnings[], max_residual_severity, coverage }`
 (검사 불가 시에는 verdict 대신 `Error { code: "untestable", message, diagnostics }` 를 반환 — `code:"untestable"` 이 곧 ERROR(검사 불가), §8.4)
+> **영속화·노출(구현됨):** verdict는 출력될 뿐 아니라 저장된다. `exporter.export`가 `metadata.verdict`(decision 문자열 REJECT/PASS/ERROR), `metadata.verdict_detail`(reasons/warnings/coverage_ok/error 포함 전체 result), `metadata.legacy_verdict`(구 scorer의 APPROVE/CONDITIONAL/REJECT 문자열)를 함께 `findings.json`에 쓴다 — 더 이상 레거시 scorer가 verdict를 덮어쓰지 않는다. read-API(`api/store.read_session_detail`)는 `session.verdict_detail`로 이를 노출하고, **정적 단독 스캔**은 `_static_verdict()`가 같은 `verdict.evaluate(coverage_ok=True)`로 REJECT/PASS를 산출한다(정적은 항상 커버리지가 있어 ERROR는 안 남).
 
 - **decision:** `REJECT` / `PASS` (검사 불가는 decision을 내지 않고 별도 ERROR 반환, §8.4)
 - **REJECT 사유 분류** (우선순위순·상호배타): `known-malware`(DETERMINISTIC denylist/패키지 적중에 한정) → `machine-takeover`(그 외 TAKEOVER-강) → `data-access`(PARTIAL_CI, C) → `integrity-manipulation`(PARTIAL_CI, I)
@@ -590,8 +597,8 @@ vulnerable 서버의 "민감 경로 파일 read" 1건을 단계별로:
 | `kind → (impact, evidence)` 카탈로그 (§9)    | 신규 `policy.py`                                                                                                                                                                       |
 | 방법별 confidence 기준치 (§6)                  | 신규 `confidence.py`                                                                                                                                                                   |
 | `Finding`에 `kind`/`impact`/`evidence` 필드 | [models.py](../src/mcp_security_analyzer/dynamic/models.py) (현재 없음)                                                                                                                  |
-| invisible-unicode 2분할 (§4.4)             | [descriptions.py:395-406](../src/mcp_security_analyzer/static/scanners/descriptions.py#L395-L406)                                                                                    |
-| 메모리 손상 크래시 식별 (§8.3)                     | sysmon `server_crash` 이벤트의 시그널/exit code 기반 분류 — **미구현(신규 추가 필요)**. 현재 [r6_stability.py:368](../src/mcp_security_analyzer/dynamic/scanners/r6_stability.py#L368)은 시그널 구분 없이 HIGH만 부여 |
+| invisible-unicode 2분할 (§4.4)             | **구현됨** — [descriptions.py:408-427](../src/mcp_security_analyzer/static/scanners/descriptions.py#L408-L427) `_find_invisible` → `kind=r3.invisible_unicode_bidi`/`_zw` ([descriptions.py:308](../src/mcp_security_analyzer/static/scanners/descriptions.py#L308))                                                                                    |
+| 메모리 손상 크래시 식별 (§8.3)                     | **구현됨** — `verdict.is_memory_corruption_signal()`([verdict.py:134](../src/mcp_security_analyzer/dynamic/output/verdict.py#L134))가 크래시 프로세스의 음수 returncode로 판정, orchestrator `_collect`가 `crash_signals`→`mem_corruption_crash`로 수집해 `evaluate()`에 전달 → `WARN_MEMORY_CORRUPTION` 플래그(Docker는 컨테이너 returncode라 주로 no-docker에서 동작) |
 | coverage→ERROR(검사 불가) (§8.4)             | orchestrator 부팅 실패 예외를 ERROR로 표면화 + `r6.coverage_incomplete` 케비엇                                                                                                                     |
 
 

@@ -5,8 +5,9 @@
 
 Pre-deployment security scanner for **MCP servers** — static analysis on
 source / manifest / tool metadata plus sandboxed dynamic fuzzing, scored
-against a six-type risk taxonomy (R1–R6) into a single deploy verdict
-(`APPROVE` / `CONDITIONAL` / `REJECT`). Ships with a web UI (English/Korean).
+against a six-type risk taxonomy (R1–R6) into a single deploy verdict —
+`REJECT` / `PASS`, plus `ERROR` for an untestable scan (no coverage) — derived
+from an (Impact × Evidence) model. Ships with a web UI (English/Korean).
 
 ```
 ┌─ frontend (React/Vite, nginx) ─┐      ┌─ backend (FastAPI) ─┐      ┌ minos CLI ┐
@@ -46,8 +47,10 @@ docker compose up --build
 - Backend API → http://localhost:8000 (OpenAPI docs at `/docs`)
 
 nginx reverse-proxies `/api` to the backend, so there's no CORS setup. This mode
-serves the UI over whatever scan output is in `backend/results/` (and the bundled
-sample dataset when empty). The containerized backend can't see your host's MCP
+serves the UI over whatever scan output is in `backend/results/` — real scan
+output only; with an empty `results/` the dashboard, sessions, findings, and
+overview are empty (the bundled sample now supplies only static UI lookups, not
+data). The containerized backend can't see your host's MCP
 config files or Docker daemon, so **discovery and live scanning are limited here**
 — see mode B for the full experience, or
 ["Real scans in Docker"](#real-scans-in-docker-optional) to wire them up.
@@ -117,7 +120,9 @@ their real phase / scanner / source location.
   structured steps, raw-output toggle, ETA, and crash/timeout markers. The
   dynamic phase is labeled "analysis" (not "sandbox") when Docker is off.
 - **Report → PDF** — export via the browser print path (vector, selectable text;
-  every finding expanded).
+  every finding expanded).- **Deploy verdict** — the report surfaces the (Impact × Evidence) verdict
+  (`REJECT` / `PASS` / `ERROR`) with its blocking reasons and non-blocking
+  warnings (including the potential-memory-corruption crash flag).
 
 ## <a name="real-scans-in-docker-optional"></a>Real scans in Docker (optional)
 

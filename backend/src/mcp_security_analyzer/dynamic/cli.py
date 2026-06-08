@@ -61,11 +61,9 @@ def discover() -> None:
 
 
 @main.command()
-@click.option(
-    "--target",
-    required=True,
-    help="Name of a discovered MCP server (see `discover`)",
-)
+@click.option("--target", default=None, help="Name of a discovered MCP server (see `discover`)")
+@click.option("--command", default=None, help="Server launch command (e.g. npx, uvx, python3)")
+@click.option("--arg", "args", multiple=True, help="Server argument (repeatable)")
 @click.option(
     "--source",
     default=None,
@@ -75,21 +73,31 @@ def discover() -> None:
 @click.option("--quick", is_flag=True, help="Quick scan (R1 + R3 + R5 only)")
 @click.option("--format", "fmt", type=click.Choice(["json", "summary"]), default="summary")
 @click.option("--no-docker", is_flag=True, help="Run server locally without Docker")
+@click.option("--timeout", type=int, default=None,
+              help="Sandbox scan-budget ceiling in seconds (overrides config; heavy servers need more)")
 def scan(
-    target: str,
+    target: str | None,
+    command: str | None,
+    args: tuple[str, ...],
     source: str | None,
     config_path: str | None,
     quick: bool,
     fmt: str,
     no_docker: bool,
+    timeout: int | None,
 ) -> None:
-    """Run the combined static + dynamic analysis on a discovered MCP server.
+    """Run the combined static + dynamic analysis on an MCP server.
 
     Equivalent to running ``static`` and ``dynamic`` together: the static
     source-tree scanners (manifest security, Semgrep) run before the sandbox,
     and the description / schema scanners run after with the runtime
     ``tools/list`` as additional input. Use ``static`` or ``dynamic`` to run
     each phase on its own.
+
+    Select the target either way:
+
+        minos scan --target chrome-devtools
+        minos scan --command npx --arg chrome-devtools-mcp@latest
     """
     if config_path:
         cfg = load_config(config_path)
@@ -99,27 +107,38 @@ def scan(
     else:
         cfg = AnalysisConfig()
 
-    servers = discover_servers()
-    if not servers:
+    if timeout is not None:
+        cfg.sandbox.timeout = timeout
+
+    if target:
+        servers = discover_servers()
+        if not servers:
+            click.echo(
+                "Error: no MCP servers found. Run `minos discover` "
+                "to see what's available, or pass --command/--arg directly.",
+                err=True,
+            )
+            sys.exit(1)
+        try:
+            picked = select_server(servers, target, source)
+        except ValueError as exc:
+            click.echo(f"Error: {exc}", err=True)
+            sys.exit(1)
+        # Pydantic models are immutable-by-convention here; replace the whole
+        # server block with the discovered config so all fields transfer cleanly.
+        cfg.server = picked.server
+        console.print(
+            f"[green]Target:[/green] {picked.name}  "
+            f"[dim]({picked.source} — {picked.source_path})[/dim]"
+        )
+    elif command:
+        cfg.server = ServerConfig(command=command, args=list(args))
+    else:
         click.echo(
-            "Error: no MCP servers found. Run `minos discover` "
-            "to see what's available, or configure one in Claude Desktop/Code first.",
+            "Error: provide either --target <name> or --command <cmd>.",
             err=True,
         )
         sys.exit(1)
-    try:
-        picked = select_server(servers, target, source)
-    except ValueError as exc:
-        click.echo(f"Error: {exc}", err=True)
-        sys.exit(1)
-
-    # Pydantic models are immutable-by-convention here; replace the whole
-    # server block with the discovered config so all fields transfer cleanly.
-    cfg.server = picked.server
-    console.print(
-        f"[green]Target:[/green] {picked.name}  "
-        f"[dim]({picked.source} — {picked.source_path})[/dim]"
-    )
 
     # Static phase: collect environment information (local source scan or
     # tarball fetch + scan) so the dynamic side can configure the sandbox
@@ -138,7 +157,16 @@ def scan(
 
     from mcp_security_analyzer.dynamic.orchestrator import run_analysis, build_default_scanners
 
+    drift: list = []
     try:
+        # Documented order (docs/static-analysis.md): tarball → static → dynamic.
+        # The source-tree scanners (manifest, semgrep) + description/schema audits
+        # run on the extracted source BEFORE the sandbox boots. Only the
+        # source↔runtime metadata-divergence (rug-pull) check needs the runtime
+        # tools/list, so it's deferred until after the dynamic phase below.
+        static_report = run_static_findings(snapshot, include_divergence=False)
+        _print_static_report(static_report)
+
         output = asyncio.run(
             run_analysis(
                 cfg,
@@ -147,30 +175,39 @@ def scan(
                 environment_snapshot=snapshot,
             ),
         )
-        # Now that the dynamic phase has captured the runtime tools/list,
-        # feed those tool definitions into the static description / schema
-        # scanners. Source-tree scanners (manifest, semgrep) also run here,
-        # while the extracted tarball is still on disk (cleanup is below).
-        static_report = run_static_findings(snapshot, runtime_tools=output.tools)
-        _print_static_report(static_report)
+
+        # Runtime-drift check now that the dynamic phase captured tools/list.
+        if static_report.source_tools and output.tools:
+            from mcp_security_analyzer.static.scanners.metadata_divergence import (
+                scan_metadata_divergence,
+            )
+            drift = list(scan_metadata_divergence(list(static_report.source_tools), output.tools))
     finally:
         # Remove any temp directory the static phase extracted a tarball into.
         snapshot_cleanup()
+
+    static_findings = list(static_report.findings) + drift
 
     # Unified severity/verdict over the static + dynamic finding pool
     # (docs/severity-verdict-model.md §5 union).
     from mcp_security_analyzer.dynamic.output import verdict as verdict_mod
 
     unified_verdict = verdict_mod.evaluate(
-        list(output.findings) + list(static_report.findings),
+        list(output.findings) + static_findings,
         coverage_ok=output.metadata.get("tools_tested", 0) > 0,
     )
+
+    # run_analysis only persisted the dynamic findings + dynamic verdict. Merge
+    # the static findings and the unified verdict into the session's
+    # findings.json so the report (web UI / read API) reflects the full scan.
+    _persist_unified(output, static_findings, unified_verdict)
 
     if fmt == "json":
         import json
 
         combined = {
             "static": static_report.to_dict(),
+            "static_drift": [f.to_dict() for f in drift],
             "dynamic": json.loads(output.model_dump_json()),
             "verdict": unified_verdict.to_dict(),
         }
@@ -178,6 +215,51 @@ def scan(
     else:
         _print_summary(output)
         _print_verdict(unified_verdict.to_dict(), title="Unified verdict (static + dynamic)")
+
+
+def _persist_unified(output: "object", static_findings: list, unified_verdict: "object") -> None:
+    """Merge static findings + the unified verdict into the session's findings.json.
+
+    ``run_analysis`` already wrote the dynamic findings + dynamic verdict; this
+    appends the static findings (tagged ``phase=static``, enriched to the dynamic
+    finding shape) and overwrites the verdict with the static+dynamic union so
+    the persisted report matches what ``scan`` printed.
+    """
+    import json
+    from datetime import UTC, datetime
+    from pathlib import Path
+    from uuid import uuid4
+
+    session_dir = Path(output.event_log_path).parent  # type: ignore[attr-defined]
+    fj = session_dir / "findings.json"
+    try:
+        data = json.loads(fj.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+
+    now = datetime.now(UTC).isoformat()
+    findings = data.get("findings") or []
+    by_sev: dict[str, int] = {}
+    for f in findings:
+        by_sev[f.get("severity")] = by_sev.get(f.get("severity"), 0) + 1
+    for finding in static_findings:
+        sf = dict(finding.to_dict())
+        sf.setdefault("finding_id", f"fnd-{uuid4()}")
+        sf.setdefault("detected_at", now)
+        sf.setdefault("related_events", [])
+        sf.setdefault("reproduction", "")
+        sf["phase"] = "static"
+        sf["scanner"] = sf.get("scanner") or "semgrep"
+        findings.append(sf)
+        by_sev[sf.get("severity")] = by_sev.get(sf.get("severity"), 0) + 1
+
+    uv = unified_verdict.to_dict()  # type: ignore[attr-defined]
+    data["findings"] = findings
+    meta = data.setdefault("metadata", {})
+    meta["verdict"] = uv["decision"]
+    meta["verdict_detail"] = uv
+    meta["by_severity"] = by_sev
+    fj.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
 
 
 def _print_static_report(report: "object") -> None:
@@ -310,6 +392,8 @@ def static(
 @click.option("--quick", is_flag=True, help="Quick scan (R1 + R3 + R5 only)")
 @click.option("--format", "fmt", type=click.Choice(["json", "summary"]), default="summary")
 @click.option("--no-docker", is_flag=True, help="Run server locally without Docker")
+@click.option("--timeout", type=int, default=None,
+              help="Sandbox scan-budget ceiling in seconds (overrides config; heavy servers need more)")
 def dynamic(
     target: str | None,
     command: str | None,
@@ -318,6 +402,7 @@ def dynamic(
     quick: bool,
     fmt: str,
     no_docker: bool,
+    timeout: int | None,
 ) -> None:
     """Run only the dynamic (sandboxed runtime) analysis — no static scanners.
 
@@ -339,6 +424,9 @@ def dynamic(
         cfg = load_config(Path(__file__).parents[3] / "configs" / "quick.yaml")
     else:
         cfg = AnalysisConfig()
+
+    if timeout is not None:
+        cfg.sandbox.timeout = timeout
 
     if target:
         servers = discover_servers()

@@ -77,6 +77,20 @@ _PACKAGE_RUNNERS = frozenset({
     "uv", "uvx", "npx", "pnpx", "bunx", "pipx",
 })
 
+
+def _pick_free_port() -> int:
+    """Return a currently-free localhost TCP port (bind to :0, let the OS pick).
+
+    Used to publish an HTTP-transport container on a unique host port per scan so
+    concurrent scans don't collide on one fixed port. Tiny TOCTOU window between
+    close and ``docker run`` is acceptable for a per-scan one-shot.
+    """
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
 _SECRET_KEY_RE = re.compile(
     r"(?i)(secret|token|api[_\-]?key|password|passwd|credential)",
 )
@@ -314,6 +328,11 @@ class Sandbox:
         self._bootstrap_retry_done: bool = False
         self._container_name: str = f"mcp-analyzer-{uuid.uuid4().hex[:12]}"
         self._workspace_dir: str = str(Path.cwd().resolve())
+        # For HTTP-transport servers: the host port the container port is
+        # published on. Chosen fresh (free) per (re)start so concurrent scans
+        # don't collide on a single fixed host port. None until the first
+        # docker cmd is built.
+        self._host_http_port: int | None = None
         # Sidecar lifecycle state: backend services declared by recipes.
         # When non-empty the MCP server runs on a private docker network so
         # sidecars are reachable by their alias and the host is not.
@@ -383,7 +402,10 @@ class Sandbox:
         """Local base URL to reach the target HTTP transport server."""
         if self._server.transport != "http" or not self._server.http_port:
             return None
-        return f"http://127.0.0.1:{self._server.http_port}"
+        # Use the dynamically published host port when known (set by
+        # _build_docker_cmd); fall back to the configured port for --no-docker.
+        host_port = self._host_http_port or self._server.http_port
+        return f"http://127.0.0.1:{host_port}"
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -852,7 +874,11 @@ class Sandbox:
             cmd += ["-v", f"{host_dir}:{container_dir}:ro"]
 
         if self._server.transport == "http" and self._server.http_port:
-            cmd += ["-p", f"127.0.0.1:{self._server.http_port}:{self._server.http_port}/tcp"]
+            # Publish the container port on a FREE host port (re-picked each
+            # build) so two concurrent HTTP-transport scans don't fight over a
+            # single fixed host port. http_base_url reports the chosen port.
+            self._host_http_port = _pick_free_port()
+            cmd += ["-p", f"127.0.0.1:{self._host_http_port}:{self._server.http_port}/tcp"]
 
         cmd.append(image)
         # Bootstrap actions may prepend a wrapper (e.g. the prebuilt-node-modules

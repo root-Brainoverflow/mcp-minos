@@ -6,12 +6,12 @@
 
 ## R1 — Unauthorized Data Access / Exfiltration
 
-- **스캐너**: [`r1_data_access.py`](../src/mcp_dynamic_analyzer/scanners/r1_data_access.py)
+- **스캐너**: [`r1_data_access.py`](../src/mcp_security_analyzer/dynamic/scanners/r1_data_access.py)
 - **페이로드 모듈**: 별도 페이로드 없음 — **부수 채널(side channel) 기반**
 
 | 신호원 | 어떻게 잡나 |
 |---|---|
-| **honeypot** | 스캔 시작 시 sandbox에 가짜 민감 파일(`.env`, `~/.aws/credentials`, `~/.ssh/id_rsa`, `cookies.sqlite`, 워크스페이스 git config) 5개를 미끼로 깔고, 서버가 그걸 `open()`/`read()`/`exec()` 하는지 strace로 감시. 접근 = HIGH/CRITICAL 정탐 |
+| **honeypot** | 스캔 시작 시 sandbox에 가짜 민감 파일(`.ssh/id_rsa`, `.aws/credentials`, `.env`, `.kube/config`, `.git-credentials`) 5개를 미끼로 깔고(canary UUID 삽입), 서버가 그걸 건드리는지 감시. 접근 = HIGH/CRITICAL 정탐 |
 | **outbound_connection** | 컨테이너에서 신뢰 IP 집합(MCP 서버가 의도적으로 통신하기로 한 호스트, sidecar IP 등) 외로 나가는 connect(2) / 네트워크 이벤트. 외부 유출 시도 = HIGH |
 
 → R1은 **페이로드를 주입하는 게 아니라 환경을 미끼화**해서 서버 행동을 관찰하는 형태.
@@ -20,8 +20,8 @@
 
 ## R2 — Unauthorized Code / Command Execution
 
-- **스캐너**: R5 `_check`가 RCE 카테고리 응답을 R2로 분류 + R6 일부
-- **페이로드 모듈**: [`rce.py`](../src/mcp_dynamic_analyzer/payloads/rce.py) + [`command_injection.py`](../src/mcp_dynamic_analyzer/payloads/command_injection.py)
+- **스캐너**: [`r2_code_exec.py`](../src/mcp_security_analyzer/dynamic/scanners/r2_code_exec.py) (`R2CodeExecScanner`) — execve(`process_exec`) 이벤트를 직전 fuzz 페이로드와 상관(`r2.shell_exec`/`r2.installer_exec`/`r2.cmd_injection_exec`) + fuzz 응답의 RCE 흔적 분석. R5는 RCE-응답 판정을 이 스캐너에 위임
+- **페이로드 모듈**: [`rce.py`](../src/mcp_security_analyzer/dynamic/payloads/rce.py) + [`command_injection.py`](../src/mcp_security_analyzer/dynamic/payloads/command_injection.py)
 
 ### `rce.py` — `PAYLOADS` dict
 
@@ -55,8 +55,8 @@
 
 ## R3 — LLM Behavior Manipulation
 
-- **스캐너**: [`r3_llm_manipulation.py`](../src/mcp_dynamic_analyzer/scanners/r3_llm_manipulation.py)
-- **페이로드 모듈**: [`injection_patterns.py`](../src/mcp_dynamic_analyzer/payloads/injection_patterns.py) + [`tool_poisoning.py`](../src/mcp_dynamic_analyzer/payloads/tool_poisoning.py) + [`resource_poisoning.py`](../src/mcp_dynamic_analyzer/payloads/resource_poisoning.py)
+- **스캐너**: [`r3_llm_manipulation.py`](../src/mcp_security_analyzer/dynamic/scanners/r3_llm_manipulation.py)
+- **페이로드 모듈**: [`injection_patterns.py`](../src/mcp_security_analyzer/dynamic/payloads/injection_patterns.py) + [`tool_poisoning.py`](../src/mcp_security_analyzer/dynamic/payloads/tool_poisoning.py) + [`resource_poisoning.py`](../src/mcp_security_analyzer/dynamic/payloads/resource_poisoning.py)
 
 R3는 **페이로드를 주입하는 스캐너가 아니라 서버가 LLM에게 보내는 텍스트(도구 description / response / resource)를 검사**하는 스캐너. 그 검사기를 구동하는 패턴 집합:
 
@@ -80,7 +80,7 @@ R3는 **페이로드를 주입하는 스캐너가 아니라 서버가 LLM에게 
 - `DESCRIPTION_PAYLOADS` / `PARAMETER_DESCRIPTION_PAYLOADS`: tool description에 LLM 지시문이 박혀있는 패턴
 - `ENUM_POISON_PAYLOADS`: enum 값에 명령어 박기
 - `SHADOW_NAMES`: 다른 도구를 사칭하는 도구 이름
-- `HIDDEN_UNICODE_CODEPOINTS`: bidirectional override, zero-width 문자 (Trojan Source)
+- `HIDDEN_UNICODE_CODEPOINTS`: bidirectional override, zero-width 문자 (Trojan Source). 정적 `descriptions.py` 검사기는 이를 둘로 나눠 발화: `r3.invisible_unicode_bidi`(bidi/제어문자 — 정탐 확정, DETERMINISTIC) vs `r3.invisible_unicode_zw`(단독 zero-width — i18n/이모지로 양성일 수 있어 POTENTIAL/경고)
 
 ### `resource_poisoning.py`
 
@@ -92,8 +92,8 @@ R3는 **페이로드를 주입하는 스캐너가 아니라 서버가 LLM에게 
 
 ## R4 — Behavioral Inconsistency / Deception
 
-- **스캐너**: [`r4_behavior_drift.py`](../src/mcp_dynamic_analyzer/scanners/r4_behavior_drift.py)
-- **페이로드 모듈**: [`behavior_drift.py`](../src/mcp_dynamic_analyzer/payloads/behavior_drift.py) (`PAYLOADS` dict)
+- **스캐너**: [`r4_behavior_drift.py`](../src/mcp_security_analyzer/dynamic/scanners/r4_behavior_drift.py)
+- **페이로드 모듈**: [`behavior_drift.py`](../src/mcp_security_analyzer/dynamic/payloads/behavior_drift.py) (`PAYLOADS` dict)
 
 페이로드는 도구에 보내는 입력이 아니라 **컨테이너 환경 변수**. 같은 도구 호출을 환경만 바꿔 반복했을 때 응답이 달라지는지 (서버가 "누가 보는지"에 따라 다른 도구 / 다른 내용 노출하는지) 비교:
 
@@ -114,7 +114,7 @@ Orchestrator가 컨테이너를 `env_0`, `env_1` 등으로 여러 번 띄우고 
 
 ## R5 — Input Handling Vulnerabilities
 
-- **스캐너**: [`r5_input_validation.py`](../src/mcp_dynamic_analyzer/scanners/r5_input_validation.py) — `FuzzingSequence`
+- **스캐너**: [`r5_input_validation.py`](../src/mcp_security_analyzer/dynamic/scanners/r5_input_validation.py) — `FuzzingSequence`
 - **페이로드 모듈**: 7개 모듈
 
 ### `type_confusion.py` — `PAYLOADS` dict (12 카테고리)
@@ -185,8 +185,8 @@ Orchestrator가 컨테이너를 `env_0`, `env_1` 등으로 여러 번 띄우고 
 
 ## R6 — Service Stability Threats
 
-- **스캐너**: [`r6_stability.py`](../src/mcp_dynamic_analyzer/scanners/r6_stability.py) — `StabilityFuzzingSequence`
-- **페이로드 모듈**: [`stability.py`](../src/mcp_dynamic_analyzer/payloads/stability.py) (`PAYLOADS` dict — **구성형(constructive)**)
+- **스캐너**: [`r6_stability.py`](../src/mcp_security_analyzer/dynamic/scanners/r6_stability.py) — `StabilityFuzzingSequence`
+- **페이로드 모듈**: [`stability.py`](../src/mcp_security_analyzer/dynamic/payloads/stability.py) (`PAYLOADS` dict — **구성형(constructive)**)
 
 | 카테고리 | 페이로드 형태 | 노리는 것 |
 |---|---|---|
@@ -214,7 +214,7 @@ Orchestrator가 컨테이너를 `env_0`, `env_1` 등으로 여러 번 띄우고 
 
 ## chain_attack (보조)
 
-- **스캐너**: [`chain_attack.py`](../src/mcp_dynamic_analyzer/scanners/chain_attack.py)
+- **스캐너**: [`chain_attack.py`](../src/mcp_security_analyzer/dynamic/scanners/chain_attack.py)
 
 페이로드 보내는 게 아니라 **도구 메타데이터 정적 분석**. 위험 동사(`delete`, `drop`, `exec`, `install` 등)가 read 의도로 명명된 도구가 아닌 곳에 노출됐는지 검사. R3에 가까우나 별도 처리.
 
@@ -246,7 +246,7 @@ Orchestrator가 컨테이너를 `env_0`, `env_1` 등으로 여러 번 띄우고 
 | **R5** (sql_injection / nosql / path_traversal / ssrf) | ✅ **가치 있음** | DB 엔진별 / OS별 / cloud별 변종이 잘 정제됨 |
 | **R6** | ❌ **표현 불가** | 구성형 페이로드. 32자 Python 코드(`["x"] * 1_000_000`)가 5MB 입력을 만들어내는 형태 — 텍스트 파일로 표현 불가능. R6의 정탐 3건이 전부 이 형태로 잡힘 |
 
-**계획**: 빌드타임 vendor 구조(`src/mcp_dynamic_analyzer/payloads/vendored/`) — SecLists / PATTI에서 R2/R5용 페이로드만 sparse-checkout으로 가져와 카테고리에 합치기. R6는 구성형 그대로 유지.
+**계획**: 빌드타임 vendor 구조(`src/mcp_security_analyzer/dynamic/payloads/vendored/`) — SecLists / PATTI에서 R2/R5용 페이로드만 sparse-checkout으로 가져와 카테고리에 합치기. R6는 구성형 그대로 유지.
 
 ---
 

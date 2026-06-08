@@ -25,23 +25,37 @@ from mcp_security_analyzer.dynamic.scanners.base import BaseScanner
 
 log = structlog.get_logger()
 
-# Sensitive paths that a well-behaved MCP server should never touch.
+# High-signal secret paths a server should never open. Deliberately narrow: the
+# language runtime (node/npm/python) legitimately reads /etc/passwd, /etc/hosts,
+# .npmrc, node_modules/** and files whose *contents* mention "credentials" at
+# startup, so the old broad substrings ("credentials", "secrets", ".env",
+# "/etc/hosts", …) produced false REJECTs on benign servers. The primary R1
+# signal is the honeypot/canary (planted decoys) below; this syscall list only
+# catches unambiguous credential targets.
 _SENSITIVE_PATHS: list[str] = [
-    "/etc/passwd",
     "/etc/shadow",
-    "/etc/hosts",
     "/proc/self/environ",
-    ".ssh/",
-    ".aws/",
-    ".kube/",
+    ".ssh/id_rsa",
+    ".ssh/id_ed25519",
+    ".ssh/id_dsa",
+    ".aws/credentials",
+    ".kube/config",
     ".git-credentials",
-    ".env",
-    ".npmrc",
-    ".pypirc",
-    "id_rsa",
-    "credentials",
-    "secrets",
+    ".docker/config.json",
+    ".pem",
 ]
+
+# Paths owned by the package runtime / the server's own install — opened during
+# normal startup (module loading, npm/npx machinery), never an exfil signal.
+_RUNTIME_NOISE: tuple[str, ...] = (
+    "node_modules", "/.npm", "/.npmrc", "/.cache", "/.config",
+    "site-packages", "dist-packages", "/usr/lib/node", "/usr/local/lib/node",
+)
+
+
+def _is_runtime_noise(path: str) -> bool:
+    p = path.lower()
+    return any(s in p for s in _RUNTIME_NOISE)
 
 # Internal IP ranges — connections here may indicate SSRF.
 _INTERNAL_PREFIXES: list[str] = [
@@ -86,25 +100,27 @@ class R1DataAccessScanner(BaseScanner):
 
     async def _check_file_access(self, reader: Any) -> list[Finding]:
         findings: list[Finding] = []
-        file_types = ("file_open", "file_read", "file_write")
+        seen: set[str] = set()
 
-        for ft in file_types:
-            async for evt in reader.events_by_type(ft):
-                path = evt.data.get("path", "")
-                if _is_sensitive(path):
-                    findings.append(Finding(
-                        risk_type=RiskType.R1,
-                        severity=Severity.HIGH,
-                        confidence=0.85,
-                        kind="r1.sensitive_read",
-                        title=f"Access to sensitive path: {path}",
-                        description=(
-                            f"Server performed '{evt.type}' on '{path}', "
-                            f"which is a sensitive credential or config file."
-                        ),
-                        related_events=[evt.event_id],
-                        reproduction=f"Monitor syscalls during server execution for {ft} on {path}",
-                    ))
+        # Only file_open carries a real path (read/write events are fd-based and
+        # no longer carry a buffer-as-path). Skip the runtime's own files.
+        async for evt in reader.events_by_type("file_open"):
+            path = evt.data.get("path", "")
+            if not path or path in seen or _is_runtime_noise(path) or not _is_sensitive(path):
+                continue
+            seen.add(path)
+            findings.append(Finding(
+                risk_type=RiskType.R1,
+                severity=Severity.HIGH,
+                confidence=0.85,
+                kind="r1.sensitive_read",
+                title=f"Access to sensitive path: {path}",
+                description=(
+                    f"Server opened '{path}', a sensitive credential or config file."
+                ),
+                related_events=[evt.event_id],
+                reproduction=f"Monitor syscalls during server execution for open on {path}",
+            ))
 
         return findings
 
