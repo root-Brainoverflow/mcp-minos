@@ -180,6 +180,17 @@ _DANGEROUS_WORD_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Verbs that announce a READ-ONLY operation. When a tool's NAME contains one of
+# these, an ambiguous dangerous word in its *description* ("execute a search",
+# "run a query") is benign phrasing — the tool isn't actually destructive.
+# Underscore is a word char, so ``\bsearch\b`` would miss ``semantic_search``;
+# match read-only verbs as tokens delimited by any non-letter (``_``/``-``/space).
+_READONLY_NAME_RE = re.compile(
+    r"(?<![a-z])(search|query|lookup|fetch|get|read|list|find|browse|view|describe|show"
+    r"|count|exists?|semantic|retrieve|inspect|explore|summari[sz]e)(?![a-z])",
+    re.IGNORECASE,
+)
+
 
 def _looks_destructive(tool: ToolInfo) -> bool:
     """True iff the tool's *salient* metadata (name + description) names a
@@ -193,5 +204,14 @@ def _looks_destructive(tool: ToolInfo) -> bool:
     says so in its name or description; if a server hides destructiveness *only*
     in the schema, the readOnlyHint heuristic isn't the right detector for it.
     """
-    text = tool.name.lower() + " " + (tool.description or "").lower()
-    return _DANGEROUS_WORD_RE.search(text) is not None
+    name = tool.name.lower()
+    text = name + " " + (tool.description or "").lower()
+    if _DANGEROUS_WORD_RE.search(text) is None:
+        return False
+    # A dangerous word that appears ONLY in the description ("execute a search",
+    # "run a query"), on a tool whose NAME announces a read-only operation, is
+    # benign — not a readOnlyHint mismatch. (FP: arxiv `semantic_search`.) A
+    # dangerous word in the NAME itself (e.g. `search_and_delete`) still counts.
+    if _DANGEROUS_WORD_RE.search(name) is None and _READONLY_NAME_RE.search(name):
+        return False
+    return True

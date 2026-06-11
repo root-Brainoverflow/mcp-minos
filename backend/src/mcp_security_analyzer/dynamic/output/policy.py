@@ -65,6 +65,7 @@ CATALOG: dict[str, tuple[Impact, Evidence]] = {
     "r6.high_error_rate": (_L, _R),
     "r6.sequence_timeout": (_L, _R),
     "r6.error_info_leak": (_L, _R),
+    "r6.error_code_misuse": (_L, _R),
     "r6.parser_failure": (_L, _R),
     "r6.oom_handled": (_L, _R),
     "r6.crash_handled": (_L, _R),

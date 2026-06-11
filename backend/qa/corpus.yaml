@@ -1,0 +1,56 @@
+# QA golden corpus — expected scan verdicts for known MCP servers.
+#
+# Workflow (replaces the manual "scan → paste result → fix" loop):
+#   1. Add servers below (known-good and known-bad).
+#   2. Record the current results as the golden baseline:
+#        cd backend && ../.venv/bin/python qa/run_corpus.py --update
+#      Review the recorded `expect:` blocks, then commit this file.
+#   3. After any change to the scanners/verdict, re-run to catch regressions:
+#        cd backend && ../.venv/bin/python qa/run_corpus.py
+#      Exit code is non-zero iff any verdict (or blocking-reason set) drifted
+#      from its golden — those are the only cases printed as FAIL.
+#
+# Per-case fields:
+#   name      friendly id (also passed as the discovered-server name)
+#   command   launch command (npx / uvx / python3 / docker / …)
+#   args      list of arguments
+#   profile   scan | dynamic | quick | static   (default: dynamic)
+#   docker    true/false  (default: true; override all with --no-docker)
+#   timeout   sandbox budget seconds, or null for the profile default
+#   expect:                # the golden — omit until you run --update
+#     verdict   REJECT | PASS | ERROR
+#     reasons   sorted list of blocking finding KINDS (verdict_detail.reasons[].kind,
+#               e.g. [r2.shell_exec]) — NOT the reason taxonomy (machine-takeover, …);
+#               [] for PASS. run_corpus.py --update records this same field.
+#     note      free text (why this server is in the corpus)
+
+cases:
+- name: server-everything
+  command: npx
+  args:
+  - -y
+  - '@modelcontextprotocol/server-everything'
+  profile: dynamic
+  docker: true
+  timeout: null
+
+- name: server-memory
+  command: npx
+  args:
+  - -y
+  - '@modelcontextprotocol/server-memory'
+  profile: dynamic
+  docker: true
+  timeout: null
+  expect:
+    verdict: PASS
+    reasons: []
+
+- name: context7
+  command: npx
+  args:
+  - -y
+  - '@upstash/context7-mcp@latest'
+  profile: scan
+  docker: true
+  timeout: null

@@ -1119,6 +1119,10 @@ async def start_scan(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(_BACKEND_DIR),
+            # minos can log a single line >64 KiB (a big fuzz response / data
+            # field), which would raise ValueError in the stderr drain below and
+            # leave the scan wedged "running" forever. Lift the StreamReader limit.
+            limit=2 ** 25,
         )
         _SCANS[scan_id]["process"] = proc
         asyncio.create_task(_run_scan(scan_id, proc))
@@ -1161,7 +1165,16 @@ async def _run_scan(scan_id: str, proc: asyncio.subprocess.Process) -> None:
 
     async def drain_stderr() -> None:
         assert proc.stderr
-        async for raw in proc.stderr:
+        while True:
+            try:
+                raw = await proc.stderr.readline()
+            except ValueError:
+                # A single log line exceeded even the 32 MiB limit; readline()
+                # clears the buffer, so drop it and keep draining rather than
+                # crashing _run_scan and wedging the scan as "running".
+                continue
+            if not raw:
+                break
             entry["lines"].append(raw.decode(errors="replace").rstrip())
 
     async def drain_stdout() -> None:

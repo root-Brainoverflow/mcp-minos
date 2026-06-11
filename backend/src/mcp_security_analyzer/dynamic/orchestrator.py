@@ -458,6 +458,14 @@ async def _collect(
                     )
                     tools = await _read_tools_from_events(event_store.reader)
                     remaining = []
+                    # A budget timeout means the fuzz ran to its TIME limit, not
+                    # that the server was untestable: tools were enumerated and
+                    # exercised, and the per-call / sequence timeouts within are
+                    # captured as r6 findings. So coverage is meaningful → treat
+                    # the scan as completed (PASS + stability warnings), not
+                    # ERROR. A timeout that enumerated NOTHING still yields ERROR
+                    # via the ``len(tools) > 0`` guard in coverage_ok.
+                    completed = True
 
                 except ConnectionError as exc:
                     log.error(

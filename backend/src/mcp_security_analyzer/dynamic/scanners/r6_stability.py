@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import reprlib
 from typing import Any
 
@@ -55,6 +56,30 @@ _CALL_TIMEOUT = 15.0
 # on every payload of the same shape, so re-firing eats the global budget
 # without producing new evidence.
 _CIRCUIT_BREAKER_THRESHOLD = 1
+# Tools that are long-running BY DESIGN (a "trigger-long-running-operation" /
+# sleep / poll / stream / subscribe tool): a timeout there is the tool's
+# contract, not a stability defect — its timeout finding is a false positive.
+_INTENTIONALLY_SLOW = re.compile(r"long[\s_-]*running|sleep|poll|stream|subscribe|delay", re.I)
+# Indicators that an error MESSAGE actually leaks server internals (stack trace,
+# file path, typed-exception detail, source location). A bare runtime string
+# like "Cannot read properties of undefined (reading 'map')" matches none of
+# these — it signals a bug but exposes nothing sensitive, so it is NOT CWE-209.
+_ERR_LEAK_RE = re.compile(
+    r"(?:/[\w.+-]+){2,}"                       # unix path with >=2 segments
+    r"|[A-Za-z]:\\[\\\w.+-]+"                  # windows path
+    r"|\bTraceback\b"                          # python traceback header
+    r"|\n\s*at\s+\S"                           # JS stack frame line
+    r"|\.(?:py|js|ts|go|rb|java|php|rs|cs):\d+"  # file:line
+    r"|\b\w+(?:Error|Exception):\s\S"          # "TypeError: x" / "FooException: y"
+    r"|\bline\s+\d+",                          # "line 42"
+    re.IGNORECASE,
+)
+
+
+def _error_message_leaks(msg: str) -> bool:
+    """True iff an error message exposes server internals (CWE-209), not just a
+    generic runtime string."""
+    return bool(msg) and _ERR_LEAK_RE.search(msg) is not None
 # Cascade-grouping window for client_timeout events. The fuzzer's call
 # timeout is 15 s, so back-to-back timeouts on the same tool sit ~15 s
 # apart. 30 s gives slack for the next test's setup + write while still
@@ -270,6 +295,22 @@ class R6StabilityScanner(BaseScanner):
                 f for f in findings
                 if not (f.risk_type == RiskType.R6 and f.title.startswith("Sequence timeout:"))
             ]
+
+        # Drop timeout findings for tools that are long-running by design — a
+        # timeout there is the tool's contract, not a defect. (FP from
+        # server-everything's `trigger-long-running-operation`.)
+        slow_tools = {
+            t.name for t in (ctx.tools or [])
+            if t.name and (_INTENTIONALLY_SLOW.search(t.name) or _INTENTIONALLY_SLOW.search(t.description or ""))
+        }
+        findings = [
+            f for f in findings
+            if not (
+                f.kind == "r6.sequence_timeout"
+                and f.tool_name
+                and (f.tool_name in slow_tools or _INTENTIONALLY_SLOW.search(f.tool_name))
+            )
+        ]
 
         return findings
 
@@ -538,42 +579,86 @@ class R6StabilityScanner(BaseScanner):
         share_32603 = n_32603 / total_errors if total_errors else 0.0
 
         if n_32603 >= 5 and share_32603 >= 0.5:
-            # ses-c392aa7f / ses-ee7da439 (chart server): malformed input
-            # reaches a backend NPE that's wrapped in -32603 with a leaked
-            # TypeError trace, instead of being rejected as -32602.
+            # Malformed input reaches an exception-prone path wrapped in -32603
+            # instead of a clean -32602 rejection. Whether that's an INFO leak
+            # (CWE-209) depends on what the message actually carries: a stack
+            # trace / file path / typed-exception detail leaks internals, whereas
+            # a bare runtime string ("Cannot read properties of undefined") is
+            # only a wrong-error-code / weak-validation issue (CWE-20). Don't
+            # claim an info leak when nothing sensitive actually leaks.
             sample = sample_msg.get(-32603, "")
-            findings.append(Finding(
-                risk_type=RiskType.R6,
-                severity=Severity.MEDIUM,
-                confidence=0.8,
-                kind="r6.error_info_leak",
-                title=(
-                    f"Server returns -32603 'Internal error' for "
-                    f"{n_32603}/{total_errors} malformed inputs "
-                    f"(should be -32602 Invalid Params)"
-                ),
-                description=(
-                    f"Of {total_errors} JSON-RPC error responses across the scan, "
-                    f"{n_32603} ({share_32603:.0%}) used code -32603 (Internal Error) "
-                    f"and only {n_32602} used -32602 (Invalid Params). MCP servers "
-                    f"should reserve -32603 for unexpected internal failures; user "
-                    f"input that fails validation belongs in -32602. The -32603 "
-                    f"misuse implies input is reaching exception-prone code paths "
-                    f"before any schema validation runs, and the ``message`` field "
-                    f"typically leaks a stack trace from the deepest failing layer "
-                    f"(library / backend / dependency). Maps to CWE-20 (Improper "
-                    f"Input Validation) + CWE-209 (Information Exposure Through "
-                    f"Error Messages). Sample message: {sample!r}"
-                ),
-                reproduction=(
-                    "Send malformed input (wrong type, missing required field, "
-                    "out-of-range value) to any tool; observe a -32603 response "
-                    "with a stack trace where a -32602 'Invalid Params' would "
-                    "have been correct."
-                ),
-            ))
+            common = (
+                f"Of {total_errors} JSON-RPC error responses across the scan, "
+                f"{n_32603} ({share_32603:.0%}) used code -32603 (Internal Error) "
+                f"and only {n_32602} used -32602 (Invalid Params). MCP servers "
+                f"should reserve -32603 for unexpected internal failures; user "
+                f"input that fails validation belongs in -32602. The -32603 misuse "
+                f"implies input reaches exception-prone code paths before any "
+                f"schema validation runs"
+            )
+            if _error_message_leaks(sample):
+                findings.append(Finding(
+                    risk_type=RiskType.R6,
+                    severity=Severity.MEDIUM,
+                    confidence=0.8,
+                    kind="r6.error_info_leak",
+                    title=(
+                        f"Server leaks internals via -32603 for "
+                        f"{n_32603}/{total_errors} malformed inputs "
+                        f"(should be -32602 Invalid Params)"
+                    ),
+                    description=(
+                        f"{common}, and the ``message`` field leaks a stack trace / "
+                        f"file path / typed-exception detail from the deepest failing "
+                        f"layer (library / backend / dependency). Maps to CWE-20 "
+                        f"(Improper Input Validation) + CWE-209 (Information Exposure "
+                        f"Through Error Messages). Sample message: {sample!r}"
+                    ),
+                    reproduction=(
+                        "Send malformed input (wrong type, missing required field, "
+                        "out-of-range value) to any tool; observe a -32603 response "
+                        "leaking a stack trace where a -32602 'Invalid Params' would "
+                        "have been correct."
+                    ),
+                ))
+            else:
+                findings.append(Finding(
+                    risk_type=RiskType.R6,
+                    severity=Severity.MEDIUM,
+                    confidence=0.75,
+                    kind="r6.error_code_misuse",
+                    title=(
+                        f"Server returns -32603 'Internal error' for "
+                        f"{n_32603}/{total_errors} malformed inputs "
+                        f"(should be -32602 Invalid Params)"
+                    ),
+                    description=(
+                        f"{common}. The sample message carries no stack trace / path / "
+                        f"secret, so this is a spec-conformance + input-validation "
+                        f"weakness (CWE-20), NOT an information leak: nearly every "
+                        f"malformed input drives the server into an unguarded "
+                        f"exception instead of a clean validation rejection. Sample "
+                        f"message: {sample!r}"
+                    ),
+                    reproduction=(
+                        "Send malformed input (wrong type, missing required field, "
+                        "out-of-range value) to any tool; observe a -32603 response "
+                        "where a -32602 'Invalid Params' would have been correct."
+                    ),
+                ))
             # When -32603 misuse is the headline, suppress the generic
             # rate finding — it would just say the same thing less precisely.
+            return findings
+
+        # A high error rate is EXPECTED during fuzzing when the server correctly
+        # REJECTS the malformed input with proper protocol errors (-32602 Invalid
+        # Params, -32601 Method not found, -32600 Invalid Request, -32700 Parse
+        # error). That is good validation, not "poor validation / instability".
+        # Only the non-rejection share (e.g. -32603 internal errors, handled
+        # above) is a real signal. FP: narrow-input tools (youtube-transcript)
+        # return ~100% proper rejections to garbage IDs.
+        _proper = sum(error_codes.get(c, 0) for c in (-32602, -32601, -32600, -32700))
+        if _proper / total_errors >= 0.8:
             return findings
 
         findings.append(Finding(
@@ -649,7 +734,11 @@ class R6StabilityScanner(BaseScanner):
             # definition a graceful-degradation outcome, not a stability bug.
             handled = is_handled_tool_error(resp)
 
-            if looks_like_oom(masked):
+            # A *handled* crash/OOM/recursion error — the server caught it and
+            # returned a tool error, surviving — is correct defensive behaviour,
+            # not a stability defect. Only the UNHANDLED forms (process actually
+            # crashes / OOMs) are findings; skip the handled variants as noise.
+            if not handled and looks_like_oom(masked):
                 findings.append(Finding(
                     risk_type=RiskType.R6,
                     severity=Severity.LOW if handled else Severity.HIGH,
@@ -671,7 +760,7 @@ class R6StabilityScanner(BaseScanner):
                     tool_name=tool,
                     reproduction=f"Send '{cat}' payload to tool '{tool}'",
                 ))
-            elif looks_like_stack_overflow(masked):
+            elif not handled and looks_like_stack_overflow(masked):
                 findings.append(Finding(
                     risk_type=RiskType.R6,
                     severity=Severity.LOW if handled else Severity.HIGH,
@@ -704,7 +793,7 @@ class R6StabilityScanner(BaseScanner):
                     tool_name=tool,
                     reproduction=f"Send '{cat}' bomb payload to tool '{tool}'",
                 ))
-            elif looks_like_crash(masked):
+            elif not handled and looks_like_crash(masked):
                 findings.append(Finding(
                     risk_type=RiskType.R6,
                     severity=Severity.LOW if handled else Severity.CRITICAL,

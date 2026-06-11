@@ -139,6 +139,7 @@ EXPECTED: dict[str, tuple[Severity, bool]] = {
     "r6.high_error_rate": (MED, False),
     "r6.sequence_timeout": (MED, False),
     "r6.error_info_leak": (MED, False),
+    "r6.error_code_misuse": (MED, False),
     "r6.parser_failure": (MED, False),
     "r6.oom_handled": (MED, False),
     "r6.crash_handled": (MED, False),

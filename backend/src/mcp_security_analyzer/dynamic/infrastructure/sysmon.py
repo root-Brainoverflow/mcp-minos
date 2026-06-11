@@ -254,6 +254,10 @@ class StraceBackend(_MonitorBackend):
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                # strace -f can emit a single very long line (huge syscall args);
+                # the default 64 KiB StreamReader limit would raise ValueError and
+                # kill tracing mid-scan. Match the sandbox stdout limit (32 MiB).
+                limit=2 ** 25,
             )
         except FileNotFoundError as exc:
             raise SysmonUnavailableError(
@@ -300,7 +304,18 @@ class StraceBackend(_MonitorBackend):
     async def _read_loop(self) -> None:
         assert self._proc and self._proc.stderr
         try:
-            async for raw_line in self._proc.stderr:
+            while True:
+                try:
+                    raw_line = await self._proc.stderr.readline()
+                except ValueError:
+                    # A single strace line exceeded even the 32 MiB limit.
+                    # readline() has cleared the buffer, so drop the oversized
+                    # line and keep tracing rather than ending the loop (which
+                    # would lose all syscall coverage for the rest of the scan).
+                    log.warning("sysmon.strace.line_too_long")
+                    continue
+                if not raw_line:
+                    break
                 line = raw_line.decode(errors="replace").strip()
                 evt = _parse_strace_line(line, self._session_id)
                 if evt:

@@ -327,9 +327,11 @@ recipes:
             - "@modelcontextprotocol/server-mongodb"
             - "mcp-server-mongodb"
             - "mongodb-mcp"
+            - "mongodb-mcp-server"
         - package_name_any:
             - "server-mongodb"
             - "mongodb-mcp"
+            - "mongodb-mcp-server"
     services:
       - alias: db
         image: mongo:7
@@ -355,6 +357,9 @@ recipes:
             - puppeteer-core
         - identity_tokens_any:
             - puppeteer
+            - "@modelcontextprotocol/server-puppeteer"
+            - "puppeteer-mcp-server"
+            - "server-puppeteer"
     dockerfile_lines:
       - "USER root"
       - "RUN npx -y puppeteer browsers install chrome"

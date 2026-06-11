@@ -35,6 +35,11 @@ from mcp_security_analyzer.dynamic.scanners.base import BaseScanner
 _SHELLS = {"sh", "bash", "zsh", "dash", "csh", "fish", "cmd", "cmd.exe", "powershell", "pwsh"}
 _INSTALLERS = {"pip", "pip3", "npm", "npx", "yarn", "curl", "wget", "gem", "cargo"}
 _DANGEROUS = _SHELLS | _INSTALLERS | {"python", "python3", "node", "perl", "ruby", "php"}
+# Interpreter flags that execute attacker-supplied INLINE code (node -e, python
+# -c, perl/ruby -e, php -r, node -p). A bare launcher (`node script.js`,
+# `python -m pkg`) is the runtime's own PATH-search bootstrap, NOT command
+# injection — even if it happens to fall within 5 s of a fuzz payload.
+_INLINE_CODE_FLAGS = {"-e", "--eval", "-c", "-p", "--print", "-r", "-E"}
 
 # Executables belonging to the package runtime / bootstrap, not the server's own
 # behaviour. With strace -f the whole npx→npm→node→server process tree is traced,
@@ -43,6 +48,11 @@ _DANGEROUS = _SHELLS | _INSTALLERS | {"python", "python3", "node", "perl", "ruby
 _RUNTIME_EXE_MARKERS = (
     "node_modules", "/.npm", "/npm/", "site-packages",
     "/usr/lib/node", "/usr/local/lib/node", "/.bin/",
+    # uv / uvx / pip ephemeral build & install caches. `uvx <pkg>` spins up a
+    # throwaway venv under ~/.cache/uv/builds-v0/.tmpXXX/ and runs `python -c`
+    # build steps there during startup — runtime bootstrap, NOT the server
+    # executing attacker input. (FALSE REJECT on uv-based servers, e.g. pandoc.)
+    "/.cache/uv/", "/uv/builds", "/.cache/uvx/", "/.cache/pip/", "/pip-build-",
 )
 
 
@@ -117,6 +127,14 @@ class R2CodeExecScanner(BaseScanner):
                 ))
 
             elif base in _DANGEROUS:
+                # `base in _DANGEROUS` here means an interpreter (shells and
+                # installers were handled above). Only flag the inline-code forms
+                # (node -e, python -c, …) — a bare interpreter launcher merely
+                # correlates with a fuzz payload by timing (the runtime's own
+                # bootstrap), which is a false positive.
+                argv = [str(a) for a in (evt.data.get("argv") or [])]
+                if not any(a in _INLINE_CODE_FLAGS for a in argv):
+                    continue
                 findings.append(Finding(
                     risk_type=RiskType.R2,
                     severity=Severity.CRITICAL,

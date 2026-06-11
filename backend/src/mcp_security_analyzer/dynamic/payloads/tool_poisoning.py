@@ -335,7 +335,17 @@ SUSPICIOUS_DESCRIPTION_TOKENS: list[str] = [
     "regardless of what",
     "do not tell the user",
     "without informing",
-    "silently",
+    # Bare "silently" over-matches benign idempotency prose ("the operation
+    # will succeed silently", "fails silently"). Keep only forms where it
+    # qualifies a hidden ACTION the tool is told to take.
+    "silently call",
+    "silently send",
+    "silently run",
+    "silently execute",
+    "silently invoke",
+    "silently forward",
+    "silently exfiltrate",
+    "silently read",
     "for audit purposes",
     "for compliance",
     "for telemetry",
