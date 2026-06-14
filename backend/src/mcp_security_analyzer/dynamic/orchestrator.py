@@ -43,6 +43,44 @@ log = structlog.get_logger()
 # degraded first run still sitting in the event log.
 _PREREQ_RETRY_TAG = "prereq-retry"
 
+# MCP servers whose tools only exist when a live EXTERNAL backend is reachable —
+# a cluster, the host Docker socket, or a third-party API behind a token. An
+# isolated scan sandbox deliberately has no such cluster / socket / credential /
+# internet, so these enumerate 0 tools (or crash at init). When coverage is void
+# for one of them we replace the bare "untestable" with a caveat that names what
+# is missing and how to scan it for real, instead of looking like a scanner bug.
+# (matched as case-insensitive substrings of the launch command + args)
+_EXTERNAL_BACKEND_DEPS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("kubernetes-mcp", "mcp-server-kubernetes", "k8s-mcp", "mcp-k8s", "mcp-server-k8s"),
+     "a reachable Kubernetes cluster (a valid kubeconfig or in-cluster credentials)"),
+    (("mcp-server-docker", "docker-mcp", "mcp-docker"),
+     "access to the host Docker daemon socket (/var/run/docker.sock)"),
+    (("github-mcp-server", "server-github", "github-mcp"),
+     "a GitHub token and outbound access to api.github.com"),
+    (("notion",), "a Notion integration token and outbound access to api.notion.com"),
+    (("tavily",), "a Tavily API key and outbound network access"),
+    (("n8n",), "a running n8n instance and its API credentials"),
+    (("spotify",), "Spotify OAuth credentials and outbound network access"),
+    (("slack",), "a Slack bot/app token and outbound network access"),
+    (("ghidra",), "a running Ghidra instance with the MCP bridge plugin attached"),
+)
+
+
+def _external_backend_caveat(command: str, args: list[str]) -> str | None:
+    """If the (un-coverable) server is a known external-backend server, return a
+    caveat that names the missing dependency and how to scan it for real."""
+    haystack = (command + " " + " ".join(args)).lower()
+    for needles, dep in _EXTERNAL_BACKEND_DEPS:
+        if any(n in haystack for n in needles):
+            return (
+                f"This server needs {dep} to expose its tools, which an isolated "
+                f"scan sandbox deliberately does not provide — so it enumerated no "
+                f"tools here. Scan it against your real environment instead (run "
+                f"`minos dynamic --no-docker` with the cluster / socket / token in "
+                f"place), then re-run."
+            )
+    return None
+
 
 class _TaggedWriter:
     """Injects variation_tag into events written during env-variation collection."""
@@ -252,13 +290,22 @@ async def run_analysis(
     # *recovered* crash keeps scan_completed True → the crash is an AVAILABILITY
     # warning, not ERROR. (docs/severity-verdict-model.md §8.4)
     coverage_ok = len(tools) > 0 and scan_completed
+    # When an un-coverable scan is a known external-backend server (cluster /
+    # socket / token), surface a "needs live backend" caveat instead of a bare
+    # "untestable" — it isn't a scanner failure, the sandbox just can't host the
+    # dependency. See _external_backend_caveat.
+    backend_caveat = (
+        None if coverage_ok
+        else _external_backend_caveat(config.server.command, config.server.args)
+    )
     verdict_result = verdict_mod.evaluate(
         correlated,
         coverage_ok=coverage_ok,
         memory_corruption_crash=mem_corruption_crash,
+        error_code="needs_live_backend" if backend_caveat else "untestable",
         error_message=(
             None if coverage_ok
-            else (
+            else backend_caveat or (
                 "No tools were exercised — the server may have failed to start or exposes no tools."
                 if not tools
                 else "The scan was cut short (server crashed/timed out before completing) — coverage is partial."

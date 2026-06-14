@@ -195,6 +195,7 @@ def evaluate(
     *,
     coverage_ok: bool = True,
     error_message: str | None = None,
+    error_code: str = "untestable",
     memory_corruption_crash: bool = False,
 ) -> VerdictResult:
     """Compute the server verdict from a finding pool (static+dynamic union).
@@ -246,6 +247,6 @@ def evaluate(
         warnings=warnings,
         max_residual_severity=max_res,
         coverage_ok=coverage,
-        error_code="untestable" if decision is Decision.ERROR else None,
+        error_code=(error_code if decision is Decision.ERROR else None),
         error_message=error_message if decision is Decision.ERROR else None,
     )
