@@ -364,4 +364,59 @@ recipes:
       - "USER root"
       - "RUN npx -y puppeteer browsers install chrome"
       - "USER user"
-    env: {}
+    # Chrome cannot use its own sandbox inside our locked-down container
+    # (--cap-drop ALL, no-new-privileges, tiny /dev/shm), so it crashes on
+    # launch and the server blocks before answering tools/list (0 tools ->
+    # ERROR). Force the headless container-safe launch flags. ALLOW_DANGEROUS
+    # lets @modelcontextprotocol/server-puppeteer accept --no-sandbox.
+    env:
+      PUPPETEER_LAUNCH_OPTIONS: '{"headless":true,"args":["--no-sandbox","--disable-setuid-sandbox","--disable-dev-shm-usage","--disable-gpu","--single-process","--no-zygote"]}'
+      ALLOW_DANGEROUS: "true"
+
+  # ───────────────────────────── Git (throwaway fixture repo) ──────────────────
+  #
+  # mcp-server-git needs (1) the git binary and (2) a real repository at its
+  # --repository path. The user's path is host-specific and absent in the
+  # sandbox, so we apt-install git, bake a tiny throwaway repo at /srv/scanrepo
+  # at build time, and rewrite the repository arg to it. The runtime FS is
+  # read-only except the /tmp tmpfs, so git's index is redirected there; read
+  # tools (status/log/diff/show) work and write tools (commit/add) fail cleanly
+  # — which is fine for a scan that just needs to exercise every tool. The
+  # ^/.+$ rewrite matches the whole absolute-path arg (the user's path contains
+  # spaces, so \S+ would truncate it).
+  - id: git-mcp-fixture-repo
+    description: "git binary + throwaway repo for mcp-server-git"
+    match:
+      runtime_prefix: "mcp-sandbox-python"
+      any_of:
+        - identity_tokens_any:
+            - "mcp-server-git"
+            - "mcp_server_git"
+        - package_name_any:
+            - "mcp-server-git"
+            - "mcp_server_git"
+    dockerfile_lines:
+      - "USER root"
+      - "RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*"
+      - |-
+        RUN git config --system user.email scan@example.com \
+            && git config --system user.name scan \
+            && git config --system init.defaultBranch main \
+            && git config --system safe.directory '*' \
+            && mkdir -p /srv/scanrepo \
+            && cd /srv/scanrepo \
+            && git init -q \
+            && printf 'hello\n' > README.md \
+            && printf 'print("scan")\n' > app.py \
+            && git add -A \
+            && git commit -q -m 'initial scan fixture' \
+            && git branch feature \
+            && chmod -R a+rwX /srv/scanrepo
+      - "USER user"
+    env:
+      GIT_INDEX_FILE: /tmp/git-scan-index
+    arg_rewrites:
+      - pattern: '^(--repository=)/.+$'
+        replacement: '\1/srv/scanrepo'
+      - pattern: '^/.+$'
+        replacement: '/srv/scanrepo'
