@@ -1165,6 +1165,7 @@ async def _run_scan(scan_id: str, proc: asyncio.subprocess.Process) -> None:
 
     async def drain_stderr() -> None:
         assert proc.stderr
+        n = 0
         while True:
             try:
                 raw = await proc.stderr.readline()
@@ -1176,6 +1177,15 @@ async def _run_scan(scan_id: str, proc: asyncio.subprocess.Process) -> None:
             if not raw:
                 break
             entry["lines"].append(raw.decode(errors="replace").rstrip())
+            n += 1
+            if n % 200 == 0:
+                # readline() over an already-full buffer returns without
+                # suspending, so a server that floods stderr (e.g. a browser
+                # server) would let this loop monopolise the event loop and
+                # starve sibling tasks — notably the QA harness wall-clock cap
+                # poller, which then never fires (a 2.5 h runaway was observed).
+                # Yield explicitly so co-running tasks get scheduled.
+                await asyncio.sleep(0)
 
     async def drain_stdout() -> None:
         assert proc.stdout

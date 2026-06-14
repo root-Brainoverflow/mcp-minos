@@ -772,17 +772,28 @@ class Sandbox:
             else:
                 remapped_args.append(arg)
 
+        cmd_basename = Path(self._server.command.replace("\\", "/")).name.lower()
+        is_package_runner = cmd_basename in _PACKAGE_RUNNERS
+
+        # A browser recipe (puppeteer / playwright / chrome) matched → this is a
+        # browser MCP server. Headless Chrome can't launch under the default
+        # seccomp profile even with --no-sandbox, needs a real /dev/shm, and is
+        # far hungrier for CPU/RAM than the strict 0.5-core / 512 MB budget —
+        # under that budget it thrashes and never finishes a fuzz run. Give it
+        # more headroom (the relaxations below stay browser-only).
+        is_browser = self._bootstrap_plan is not None and any(
+            any(kw in a.action_id for kw in ("puppeteer", "playwright", "chrome"))
+            for a in self._bootstrap_plan.actions
+        )
+
         cmd: list[str] = [
             "docker", "run",
             "-i", "--rm",
             "--name", self._container_name,
-            "--memory", sb.memory_limit,
-            "--cpus", str(sb.cpu_limit),
+            "--memory", "2g" if is_browser else sb.memory_limit,
+            "--cpus", "2" if is_browser else str(sb.cpu_limit),
             "--pids-limit", "512",
         ]
-
-        cmd_basename = Path(self._server.command.replace("\\", "/")).name.lower()
-        is_package_runner = cmd_basename in _PACKAGE_RUNNERS
 
         if sb.isolation == "strict":
             # Package runners install a venv + dep cache on first invocation;
@@ -806,6 +817,16 @@ class Sandbox:
             ]
             if self._sysmon_enabled:
                 cmd += ["--cap-add", "SYS_PTRACE"]
+            if is_browser:
+                # Minimal, browser-only relaxation: lift seccomp (Chrome uses
+                # syscalls the default profile blocks) and give it a real
+                # /dev/shm. Everything else — read-only rootfs, cap-drop ALL,
+                # no-new-privileges, the internal/honeypot network — stays, so
+                # the blast radius is far smaller than the non-strict profile.
+                cmd += [
+                    "--security-opt", "seccomp=unconfined",
+                    "--shm-size", "1g",
+                ]
         else:
             cmd += [
                 "--cap-add", "ALL",
