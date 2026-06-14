@@ -402,6 +402,11 @@ AND 조건이 통과하고 `any_of`/암시 블록이 모두 비어 있으면 매
 경계가 아니므로 `postgres-mcp.json`이라는 문자열은 `postgres-mcp`에 매치
 되지 않는다.
 
+> **함의(중요):** 같은 이유로 레시피는 서버가 실제 게시되는 **풀 패키지명**을 토큰 목록에 정확히 적어야 한다 —
+> `mongodb-mcp`는 `mongodb-mcp-server`에 매치되지 않는다. 유저의 `mongodb-mcp-server` ·
+> `@modelcontextprotocol/server-puppeteer`가 토큰에 빠져 있어 사이드카/브라우저 프로비저닝이 조용히 스킵되고
+> 서버가 미프로비저닝 상태로 hang하던 버그를, 풀 패키지명 추가로 고쳤다(구현됨).
+
 #### 4.3.4 `builtin.yaml`에 등록된 레시피 분류
 
 **(i) Playwright 브라우저 설치**
@@ -458,8 +463,19 @@ Chromium 번들을 설치.
 
 **(iv) `puppeteer-node`**
 
-deps에 `puppeteer`/`puppeteer-core`가 있거나 identity에 `puppeteer`가 있으면
-`npx -y puppeteer browsers install chrome` 라인을 추가.
+deps에 `puppeteer`/`puppeteer-core`가 있거나 identity에 `puppeteer`/`@modelcontextprotocol/server-puppeteer`/
+`puppeteer-mcp-server`/`server-puppeteer`가 있으면 `npx -y puppeteer browsers install chrome` 라인 + 컨테이너
+안전 launch env(`PUPPETEER_LAUNCH_OPTIONS`에 `--no-sandbox`/`--disable-dev-shm-usage`/`--single-process` 등,
+`ALLOW_DANGEROUS=true`)를 추가한다. 샌드박스 seccomp/shm/자원 완화는 §5.3 (d) `is_browser` 참고.
+
+**(v) `git-mcp-fixture-repo`**
+
+`mcp-server-git`는 git 바이너리 + `--repository` 경로의 실제 저장소가 있어야 한다. 유저 경로는 호스트 전용이라
+샌드박스에 없으므로: apt로 `git` 설치, `/srv/scanrepo`에 커밋 하나 있는 임시 저장소를 빌드 시 만들고,
+`arg_rewrites`로 `--repository` 절대경로(공백 포함이라 `^/.+$`)를 `/srv/scanrepo`로 치환한다. 런타임은
+read-only이므로 git index는 `GIT_INDEX_FILE=/tmp/git-scan-index`(쓰기 가능 tmpfs)로 우회 — read 툴
+(status/log/diff/show)은 동작하고 write 툴은 깔끔히 실패한다(스캔엔 충분). 결과: "git 바이너리 없음 ERROR"에서
+실제 스캔(진짜 크래시 발견)으로 전환.
 
 #### 4.3.5 출력
 
@@ -612,7 +628,8 @@ URL이 마운트 대상으로 잘못 인식되는 경로가 없다.
 
 - `-i --rm --name <generated>`.
 - `--memory <sb.memory_limit>` (기본 `512m`), `--cpus <sb.cpu_limit>` (기본
-0.5), `--pids-limit 512`.
+0.5), `--pids-limit 512`. **단 브라우저 서버**(아래 `is_browser`)는 Chrome가 자원을 많이 써서
+`--memory 2g --cpus 2`로 올린다 — strict 예산(0.5코어/512MB)에선 thrash해 fuzz를 완주하지 못한다.
 
 **(d) 격리 강도**
 
@@ -626,6 +643,13 @@ noexec일 때 `Permission denied`가 발생한다. 100 MB는 typical 파이썬 �
 uv 캐시에 부족해서 ENOSPC가 발생하므로 512 MB로 늘렸다.
 - `--security-opt no-new-privileges`, `--cap-drop ALL`.
 - `sysmon_enabled == True`이면 `--cap-add SYS_PTRACE`.
+- **브라우저 서버 한정 완화(`is_browser`)** — 매칭된 레시피 id에 `puppeteer`/`playwright`/`chrome`가 있으면 이
+  서버는 헤드리스 Chrome를 띄운다. Chrome는 `--no-sandbox`를 줘도 기본 seccomp 프로필이 막는 시스템콜을 쓰고
+  실제 `/dev/shm`이 필요해, strict 샌드박스에선 **툴 0개로 죽는다**. 그래서 strict를 유지한 채 딱 두 가지만 푼다:
+  `--security-opt seccomp=unconfined` + `--shm-size 1g`. `--read-only` · `--cap-drop ALL` · `no-new-privileges` ·
+  내부/허니팟 네트워크는 그대로라 permissive보다 노출면이 훨씬 좁다. PUPPETEER_LAUNCH_OPTIONS(`--no-sandbox`
+  등) + ALLOW_DANGEROUS는 puppeteer 레시피 env로 주입한다. (실측: puppeteer가 navigate/screenshot/click 등 7개
+  툴을 enumerate. 단 Docker 내 Chrome는 flaky·느려 완전 신뢰성엔 launch-retry + per-tool timeout 튜닝이 더 필요.)
 
 `sb.isolation == "permissive"`: `--cap-add ALL`, `--security-opt seccomp=unconfined`, `--security-opt apparmor=unconfined`.
 

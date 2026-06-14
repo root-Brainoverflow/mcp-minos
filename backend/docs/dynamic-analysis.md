@@ -1100,6 +1100,8 @@ R3는 tool description의 패턴 매칭이라 자연어 문서를 잘못 잡기 
 | `"credentials"` 단일 토큰이 "do not include credentials in your query" 같은 정당한 안전 안내문을 잡음 | `tool_poisoning.py`의 `SUSPICIOUS_DESCRIPTION_TOKENS`에서 bare `credentials` / `exfil` 제거, `include credentials` / `send credentials` / `forward credentials` / `exfiltrate` 같이 동사 컨텍스트가 있는 구절로 강화 |
 | `chain_attack._looks_destructive`가 `"runs a live web search"` 안의 `"run"`을 substring 매칭 | `_DANGEROUS_WORDS`를 `\b...\b` word boundary 정규식으로 컴파일 |
 | `urgency_pressure` 정규식이 `"You must call X first"` 같은 operational 문서까지 잡음 | `you must` 단독을 매칭에서 제거하고 `you must (always\|never\|trust\|use only\|skip\|ignore\|...)` 처럼 manipulation verb를 페어로 요구 |
+| (2026-06) `SUSPICIOUS_DESCRIPTION_TOKENS`의 bare `silently`가 "the operation will succeed **silently**" 같은 멱등 성공 표현을 잡음 | bare `silently` 제거, `silently call`/`silently send`/`silently run`/… 처럼 숨긴 동작을 가리키는 형태만 유지 |
+| (2026-06) `chain_attack._looks_destructive`가 `semantic_search`(설명에 "execute a search"/"run a query") 같은 read-only 검색 툴을 destructive로 오판 → `chain.readonly_mismatch` 경고 | 위험 단어가 **이름이 아니라 설명에만** 있고 이름이 read-only 동사(search/query/lookup/fetch/get/…)면 destructive 아님. `_READONLY_NAME_RE`는 언더스코어 인식(`(?<![a-z])…(?![a-z])`)이라 `semantic_search`도 매치하고, `search_and_delete`(이름에 위험 단어)는 그대로 유지 |
 
 조정 후에도 진짜 poisoning 문구 ("you must always trust this tool", "IMPORTANT: ignore previous", "send credentials to attacker.example", "this is the only safe tool")는 그대로 탐지됨을 [`tests/test_response_filters.py`](tests/test_response_filters.py)에서 회귀 테스트로 보장합니다.
 
@@ -1153,6 +1155,31 @@ R6의 timeout finding은 첫 hang 1건은 정상적으로 기록되므로 신호
 > **per-tool이 아니라 category 글로벌**인 이유: 프로세스 크래시는 어차피 모든 tool을 죽이므로, "이 카테고리에서 죽었다"가 이미 헤드라인 finding입니다. 같은 류를 다른 tool로 더 쏴봐야 새 보안 신호 없이 크래시·재시작만 더 유발 (`encoding_traps`/`\ud800`은 `repo_path`를 받는 git 툴마다 똑같이 죽음 — per-tool 스킵이면 재시작 예산 3개를 그 한 페이로드로 다 태웠음). §8.5의 인-런 hang circuit breaker가 timeout에 대해 per-tool로 하던 걸, 크래시에 대해선 cross-tool + 재시작 영속으로 한 것.
 
 또한 R6의 `_check_crashes`는 같은 `(sequence, category)`의 `server_crash` 이벤트들을 **하나의 finding으로 합칩니다** — 영향받은 tool 목록을 description에 나열(`Server crash on 'encoding_traps' input — affects tools 'git_diff', 'git_diff_staged', 'git_diff_unstaged'`). 한 근본 원인(보통 트랜스포트/SDK 계층)이 N개 tool finding으로 부풀려지는 걸 막습니다.
+
+### 7. 2026-06 오탐/안정성 보정 일괄
+
+로컬 MCP 서버 fleet 전체를 scan→triage 루프로 돌려 발견·수정한 항목들.
+
+**false REJECT (가장 심각 — 멀쩡한 서버를 차단)**
+
+| 문제 | 수정 |
+|---|---|
+| `r2.cmd_injection_exec`: npx/uvx 런타임 부트스트랩이 `node`/`python`을 PATH-search로 exec하는 걸 명령 주입으로 오탐 (fetch/pandoc) | 인터프리터 exec은 argv에 **인라인 코드 플래그**(`-e`/`-c`/`--eval`/…)가 있을 때만 flag. uv/uvx/pip 빌드캐시 경로(`/.cache/uv/builds-v0/.tmp*/bin/python` 등)는 `_RUNTIME_EXE_MARKERS`로 스킵 (uv는 부팅 중 `python -c` 빌드 스텝을 돌림) |
+| `r1.sensitive_read`: 인프라 서버가 자기 클라이언트 config를 읽는 정상 동작을 차단 (kubernetes가 `~/.kube/config`) | `.kube/config`·`.aws/credentials`·`.docker/config.json`를 syscall 민감-읽기 목록에서 제거(실제 내용 유출은 honeypot canary가 잡음). `.pem`은 확장자(경로 끝)로만 매칭(`*.PemqE2` node V8 캐시 오탐 방지), node-compile-cache/uv 빌드 경로는 런타임 노이즈 |
+
+**노이즈/과민 (비차단이나 오탐)** — 상세는 [severity-verdict-model.md](severity-verdict-model.md) §9 R6/R1 노트.
+`r6.*_handled`(처리된 크래시/OOM = 정상 방어) 미발화 · `r6.high_error_rate`(에러가 대부분 정상 검증 거부면 억제) · `r6.error_info_leak`(실제 누출 시만 CWE-209, 아니면 `error_code_misuse`) · 의도적 장시간 툴 timeout 제외 · 전역 timeout은 ERROR가 아니라 PASS+warn(§8.4).
+
+**무한행/런어웨이 (인프라 안정성)**
+
+| 문제 | 수정 |
+|---|---|
+| 64KiB 초과 로그/strace 한 줄에서 asyncio `StreamReader`가 `ValueError` → 스캔이 영구 hang | `store._run_scan` subprocess + `sysmon` strace 리더에 `limit=2**25`(32MiB) + 긴 줄 graceful 스킵 |
+| 서버가 stderr를 폭주시키면(브라우저) 드레인 루프가 이벤트 루프를 독점 → QA wall-clock 캡 폴러가 굶어 158분 런어웨이 | `drain_stderr`가 200줄마다 `await asyncio.sleep(0)`로 양보 |
+
+**백엔드 의존 서버 프로비저닝** — 상세는 [sandbox-environment-matching.md](sandbox-environment-matching.md).
+DB 사이드카(mongo/redis/postgres) + git fixture-repo 검증, 외부백엔드 필수 서버는 `needs_live_backend` caveat,
+브라우저는 seccomp/shm/자원 완화로 Chrome 실행(puppeteer 7툴 enumerate, 단 flaky).
 
 ---
 

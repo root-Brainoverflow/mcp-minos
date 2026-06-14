@@ -400,10 +400,23 @@ REJECT 조건(§8.1)이 성립하지 않으면서 **동적 검사가 의미 있�
 
 - 서버가 부팅/handshake 전에 종료 (orchestrator가 예외를 던짐 → ERROR로 표면화),
 - 노출 툴 0개,
-- **시퀀스 완주 실패** — 회복 불가 크래시(재시작 한도 `_MAX_CRASH_RESTARTS` 초과) · 전역 timeout · stdout EOF로
+- **시퀀스 완주 실패** — 회복 불가 크래시(재시작 한도 `_MAX_CRASH_RESTARTS` 초과) 또는 stdout EOF(`ConnectionError`)로
   검사가 중간에 끊김 (`scan_completed=False`),
 - "coverage incomplete / 전제조건 미충족" 주의(caveat) finding 존재
   ([r6_stability.py:292](../src/mcp_security_analyzer/dynamic/scanners/r6_stability.py#L292)).
+
+> **전역 timeout은 ERROR가 아니다(구현됨).** 툴을 enumerate한 뒤의 sandbox/sequence timeout은 "시간 예산까지
+> 다 돌린 정상 종료"이지 검사 불가가 아니다 — 툴이 노출됐고 퍼징이 진행됐으며 그 안의 per-tool/sequence timeout은
+> 각각 `r6.sequence_timeout` finding으로 보고된다. 따라서 `asyncio.TimeoutError` 핸들러는 `completed=True`로 두어
+> **PASS + 안정성 경고**가 되게 한다([orchestrator.py](../src/mcp_security_analyzer/dynamic/orchestrator.py)). 툴을 하나도
+> enumerate하기 전에 timeout 난 경우만 `len(tools)>0` 가드로 ERROR로 남는다. (느린 서버를 "검사 불가"로 오판하던 버그 수정 — sqlite 등.)
+
+**외부 백엔드 필수 서버 → `error_code = needs_live_backend`:** 격리 샌드박스가 제공할 수 없는 라이브 백엔드
+(쿠버네티스 클러스터 · Docker 소켓 · github/notion/tavily 등 토큰+인터넷)가 있어야만 툴이 노출되는 서버가 위 트리거로
+커버리지가 비면, ERROR의 `error_code`를 `untestable` 대신 **`needs_live_backend`** 로 바꾸고 "무엇이 필요한지 +
+`minos dynamic --no-docker`로 실환경에서 스캔하라"는 caveat 메시지를 단다
+([orchestrator._external_backend_caveat](../src/mcp_security_analyzer/dynamic/orchestrator.py)). 스캐너 실패가 아니라
+환경 부재임을 사용자에게 명확히 알리기 위함이다(raw ERROR/hang 금지).
 
 #### 서버 크래시 — 경고냐 ERROR냐 (판별자 = 크래시가 아니라 커버리지)
 
@@ -412,7 +425,8 @@ REJECT 조건(§8.1)이 성립하지 않으면서 **동적 검사가 의미 있�
 | 상황 | `scan_completed` | 결과 |
 |---|---|---|
 | **회복된 크래시** — 서버 재시작 후 남은 시퀀스 완주 | True | AVAILABILITY **경고** (PASS+warn) |
-| **회복 못한 크래시** — 재시작 한도 초과로 시퀀스 미완 (또는 timeout/EOF) | False | **ERROR**(검사 불가) |
+| **전역 timeout** — 툴 enumerate 후 시간 예산 초과 (timeout 핸들러가 `completed=True`) | True | 안정성 **경고** (PASS+warn) |
+| **회복 못한 크래시 / stdout EOF** — 재시작 한도 초과로 시퀀스 미완 | False | **ERROR**(검사 불가) |
 
 `_collect`가 정상 완주에만 `scan_completed=True`를 반환하고 `run_analysis`가 이를 `coverage_ok`에 반영한다(구현됨).
 **REJECT는 아니다** — 가용성 DoS를 차단하면 malformed 입력에 죽는 정상 서버 다수가 reject되어 변별력이 사라진다(§8.2). 다만
@@ -432,7 +446,7 @@ REJECT 조건(§8.1)이 성립하지 않으면서 **동적 검사가 의미 있�
 ### 8.5 출력 구성
 
 `Verdict { decision, reasons[], warnings[], max_residual_severity, coverage }`
-(검사 불가 시에는 verdict 대신 `Error { code: "untestable", message, diagnostics }` 를 반환 — `code:"untestable"` 이 곧 ERROR(검사 불가), §8.4)
+(검사 불가 시에는 verdict 대신 `Error { code, message, diagnostics }` 를 반환 — `code` 는 일반 검사 불가면 `"untestable"`, 외부 백엔드(클러스터/소켓/토큰) 부재면 `"needs_live_backend"` (§8.4). 둘 다 decision=ERROR.)
 > **영속화·노출(구현됨):** verdict는 출력될 뿐 아니라 저장된다. `exporter.export`가 `metadata.verdict`(decision 문자열 REJECT/PASS/ERROR), `metadata.verdict_detail`(reasons/warnings/coverage_ok/error 포함 전체 result), `metadata.legacy_verdict`(구 scorer의 APPROVE/CONDITIONAL/REJECT 문자열)를 함께 `findings.json`에 쓴다 — 더 이상 레거시 scorer가 verdict를 덮어쓰지 않는다. read-API(`api/store.read_session_detail`)는 `session.verdict_detail`로 이를 노출하고, **정적 단독 스캔**은 `_static_verdict()`가 같은 `verdict.evaluate(coverage_ok=True)`로 REJECT/PASS를 산출한다(정적은 항상 커버리지가 있어 ERROR는 안 남).
 
 - **decision:** `REJECT` / `PASS` (검사 불가는 decision을 내지 않고 별도 ERROR 반환, §8.4)
@@ -464,6 +478,13 @@ verdict 칸은 손으로 채우지 않고 규칙에서 생성한다.
 > SSRF는 R1 network(loopback/link-local/metadata 버킷)와 R5 fuzz 양쪽에서 발화할 수 있다
 > ([r5:521](../src/mcp_security_analyzer/dynamic/scanners/r5_input_validation.py#L521), R1 network). 표시 시 중복 제거(dedup) 필요.
 > 차단된 외부 연결(loopback 등)은 PARTIAL_CI보다 약하면 LIMITED로 강등 가능.
+>
+> **r1.sensitive_read 정제(구현됨):** syscall 민감-읽기 목록은 "어떤 MCP 서버도 열 이유 없는" 경로만 둔다 —
+> SSH 개인키(`.ssh/id_rsa`/…) · `/etc/shadow` · `/proc/self/environ` · `.git-credentials` · `*.pem`. **클라이언트 config**
+> (`.kube/config` · `.aws/credentials` · `.docker/config.json`)는 **제외**한다: 인프라 서버(k8s/aws/docker)가 자기 config를
+> 시작 시 읽는 정상 동작을 false REJECT하던 문제(쿠버네티스 caveat까지 가렸음) 때문 — 실제 *내용* 유출은 honeypot
+> canary가 잡는다. `.pem`은 확장자(경로 끝)로만 매칭해 `8549dc65.PemqE2`(node V8 컴파일 캐시) 같은 오탐을 막고,
+> node-compile-cache/uv 빌드 경로는 런타임 노이즈로 스킵.
 
 ### R2 — 코드 실행
 
@@ -540,13 +561,21 @@ verdict 칸은 손으로 채우지 않고 규칙에서 생성한다.
 | `r6.server_crash` (미처리)                      | Syscall  | AVAILABILITY | REALIZED | HIGH(A)  | PASS+warn (SIGSEGV류 §8.3 플래그 / 검사 중단 시 §8.4 ERROR) |
 | `r6.oom` / `r6.stack_overflow` (미처리)         | 퍼징       | AVAILABILITY | REALIZED | HIGH(A)  | PASS+warn                                          |
 | `r6.high_error_rate` / `r6.sequence_timeout` | MCP 프로토콜 | LIMITED      | REALIZED | MEDIUM   | PASS+warn                                          |
-| `r6.error_info_leak` (-32603 + 스택 누출)        | MCP 프로토콜 | LIMITED      | REALIZED | MEDIUM   | PASS+warn                                          |
+| `r6.error_info_leak` (-32603 + **실제 누출**: 스택/경로/타입예외) | MCP 프로토콜 | LIMITED      | REALIZED | MEDIUM   | PASS+warn                                          |
+| `r6.error_code_misuse` (-32603, 누출 없음 → CWE-20만) | MCP 프로토콜 | LIMITED      | REALIZED | MEDIUM   | PASS+warn                                          |
 | `r6.parser_failure`                          | 퍼징       | LIMITED      | REALIZED | MEDIUM   | PASS+warn                                          |
 | `r6.coverage_incomplete` (전제조건 미충족)          | —        | LIMITED      | —        | (케비엇)    | → §8.4 ERROR(검사 불가) 유발                             |
-| `r6.*_handled` (처리된 OOM/크래시/파서)              | —        | LIMITED      | REALIZED | MEDIUM   | PASS+warn                                          |
+| ~~`r6.*_handled` (처리된 OOM/크래시/파서)~~          | —        | —            | —        | —        | **미발화** (gracefully 처리된 에러 = 정상 방어, finding 아님)    |
 
 
 > `r6.coverage_incomplete`은 위험 finding이 아니라 **커버리지 주의(caveat) 신호**다 — Evidence가 없어 §5 severity 도출에서 **제외**되며(그래서 severity 칸이 `(케비엇)`), §8.4 ERROR(검사 불가) 경로만 트리거한다.
+>
+> **오탐 정제(구현됨, 2026-06):** 퍼징 특성을 반영해 r6 신호를 좁혔다 — (1) `*_handled`(처리된 크래시/OOM/재귀)는
+> **미발화**: 에러를 잡고 생존한 건 정상 방어이지 결함이 아니다(미처리 크래시만 보고). (2) `high_error_rate`는 에러가
+> 대부분 **정상 검증 거부**(-32602/-32601/-32600/-32700)면 **억제** — 퍼징 garbage를 올바르게 거부하는 건 좋은 검증이지
+> 불안정이 아니다. (3) `error_info_leak`은 메시지가 **실제로 스택/경로/타입예외를 누출할 때만** CWE-209로 보고하고,
+> 일반 런타임 문자열("Cannot read properties of undefined")뿐이면 `error_code_misuse`(CWE-20 입력검증)로 강등.
+> (4) 의도적 장시간 툴(`*long-running*`/sleep/poll/stream/subscribe)의 timeout은 그 툴의 계약이므로 제외.
 
 ### 정적 스캐너 (해당 R-type으로 합류)
 
