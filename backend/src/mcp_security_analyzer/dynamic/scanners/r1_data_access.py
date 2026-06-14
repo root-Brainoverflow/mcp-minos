@@ -32,16 +32,21 @@ log = structlog.get_logger()
 # "/etc/hosts", …) produced false REJECTs on benign servers. The primary R1
 # signal is the honeypot/canary (planted decoys) below; this syscall list only
 # catches unambiguous credential targets.
+#
+# Client config paths (~/.kube/config, ~/.aws/credentials, ~/.docker/config.json)
+# are deliberately NOT here: an infrastructure MCP server (kubernetes / aws /
+# docker) opens its OWN config at startup to function — flagging that as a
+# sensitive-read produced a false REJECT (e.g. kubernetes-mcp-server opening
+# ~/.kube/config, which also masked the "needs a live cluster" caveat). Actual
+# exfiltration of those files' CONTENTS is still caught by the honeypot canary-
+# in-response check below; only a bare open is dropped.
 _SENSITIVE_PATHS: list[str] = [
     "/etc/shadow",
     "/proc/self/environ",
     ".ssh/id_rsa",
     ".ssh/id_ed25519",
     ".ssh/id_dsa",
-    ".aws/credentials",
-    ".kube/config",
     ".git-credentials",
-    ".docker/config.json",
     ".pem",
 ]
 
@@ -50,6 +55,7 @@ _SENSITIVE_PATHS: list[str] = [
 _RUNTIME_NOISE: tuple[str, ...] = (
     "node_modules", "/.npm", "/.npmrc", "/.cache", "/.config",
     "site-packages", "dist-packages", "/usr/lib/node", "/usr/local/lib/node",
+    "node-compile-cache", "compile-cache", "/.uv/", "/uv/builds",
 )
 
 
@@ -206,7 +212,13 @@ class R1DataAccessScanner(BaseScanner):
 
 def _is_sensitive(path: str) -> bool:
     lower = path.lower()
-    return any(s in lower for s in _SENSITIVE_PATHS)
+    # ``.pem`` is a file EXTENSION, not a substring: match only at the path end,
+    # otherwise random names like ``8549dc65.PemqE2`` (a node V8 compile-cache
+    # file) false-match and produce a false REJECT. The other entries are full
+    # path components where a substring match is correct.
+    if lower.endswith(".pem"):
+        return True
+    return any(s in lower for s in _SENSITIVE_PATHS if s != ".pem")
 
 
 def _is_internal(address: str) -> bool:
