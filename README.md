@@ -46,8 +46,9 @@ during dynamic scans, but the app itself is not containerized to run.
 
 ```bash
 cd backend
-uv sync                 # or: pip install -e .
-minos-api               # FastAPI on http://localhost:8000 (uvicorn)
+uv sync                          # or: python -m venv .venv && pip install -e .
+source .venv/bin/activate        # put minos / minos-api on PATH (or prefix each command with `uv run`)
+minos-api                        # FastAPI on http://localhost:8000 (uvicorn)
 # the scanner CLI is unchanged:
 minos discover
 minos dynamic --command npx --arg -y --arg @modelcontextprotocol/server-redis
