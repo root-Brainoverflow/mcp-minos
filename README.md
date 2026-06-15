@@ -37,28 +37,10 @@ mcp-minos/
 
 ## Quick start
 
-### A. Docker Compose — browse the UI
-
-```bash
-docker compose up --build
-```
-
-- Frontend → http://localhost:3000
-- Backend API → http://localhost:8000 (OpenAPI docs at `/docs`)
-
-nginx reverse-proxies `/api` to the backend, so there's no CORS setup. This mode
-serves the UI over whatever scan output is in `backend/results/` — real scan
-output only; with an empty `results/` the dashboard, sessions, findings, and
-overview are empty (the bundled sample now supplies only static UI lookups, not
-data). The containerized backend can't see your host's MCP
-config files or Docker daemon, so **discovery and live scanning are limited here**
-— see mode B for the full experience, or
-["Real scans in Docker"](#real-scans-in-docker-optional) to wire them up.
-
-### B. Local — real discovery + real scans
-
-Run the backend on the host so it can read your editor configs and spawn the
-`minos` scanner (which uses your local Docker for the sandbox).
+Run both services **locally** (not via Docker) — the backend on the host so it
+can read your editor configs and spawn the `minos` scanner, and the frontend via
+the Vite dev server. The analyzer still uses your local Docker *for the sandbox*
+during dynamic scans, but the app itself is not containerized to run.
 
 **Backend** (Python ≥ 3.11):
 

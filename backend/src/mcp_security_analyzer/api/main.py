@@ -99,6 +99,15 @@ def create_app() -> FastAPI:
 
     # ── Real scan execution ────────────────────────────────────────────────────
 
+    @app.get(f"{api}/scans")
+    def list_scans() -> list[dict]:
+        """All scans this process is tracking (running + finished this session).
+
+        Lets any browser session discover scans started elsewhere so they show
+        up as in-progress and can be re-attached to via the SSE stream.
+        """
+        return store.list_scans()
+
     @app.post(f"{api}/scans")
     async def create_scan(req: ScanRequest) -> dict:
         """Launch a real ``minos`` scan and return a scan_id.

@@ -43,6 +43,19 @@ log = structlog.get_logger()
 # degraded first run still sitting in the event log.
 _PREREQ_RETRY_TAG = "prereq-retry"
 
+# Analysis-phase time budgets. The collection phase is bounded by
+# ``asyncio.wait_for(sequencer.run_all(), sandbox.timeout)`` inside ``_collect``,
+# but the analysis phase (scanners + correlation) had NO timeout — so a scanner
+# that stalls or runs pathologically slow on an unusually large event log (e.g.
+# chrome-devtools-mcp with 100+ tools fuzzed produces a 1.5 GB / 1 M-event log)
+# would hang ``run_analysis`` forever with the process idle and no findings ever
+# exported. Each scanner and the correlation step now run under a wall-clock
+# budget: on timeout we skip that step (scanner → no findings; correlation →
+# fall back to the uncorrelated pool) so the scan still completes and exports a
+# (partial) report instead of hanging indefinitely.
+_SCANNER_ANALYSIS_TIMEOUT_SEC = 300.0
+_CORRELATION_TIMEOUT_SEC = 300.0
+
 # MCP servers whose tools only exist when a live EXTERNAL backend is reachable —
 # a cluster, the host Docker socket, or a third-party API behind a token. An
 # isolated scan sandbox deliberately has no such cluster / socket / credential /
@@ -264,9 +277,24 @@ async def run_analysis(
         if not scanner_cfg.get("enabled", True):
             continue
         try:
-            result = await scanner.analyze(ctx)
+            result = await asyncio.wait_for(
+                scanner.analyze(ctx),
+                timeout=_SCANNER_ANALYSIS_TIMEOUT_SEC,
+            )
             findings.extend(result)
             log.info("scanner.done", scanner=scanner.name, findings=len(result))
+        except asyncio.TimeoutError:
+            log.warning(
+                "scanner.timeout",
+                scanner=scanner.name,
+                timeout=_SCANNER_ANALYSIS_TIMEOUT_SEC,
+                hint=(
+                    "Scanner exceeded its analysis-phase time budget and was "
+                    "skipped — the event log is likely very large (many tools × "
+                    "fuzz payloads). Remaining scanners and export still run, so "
+                    "the report completes with reduced coverage for this risk."
+                ),
+            )
         except Exception:
             log.exception("scanner.error", scanner=scanner.name)
 
@@ -275,7 +303,22 @@ async def run_analysis(
     from mcp_security_analyzer.dynamic.output.reporter import Reporter
     from mcp_security_analyzer.dynamic.output.scorer import Scorer
 
-    correlated = await CorrelationEngine(reader).correlate(findings)
+    try:
+        correlated = await asyncio.wait_for(
+            CorrelationEngine(reader).correlate(findings),
+            timeout=_CORRELATION_TIMEOUT_SEC,
+        )
+    except asyncio.TimeoutError:
+        log.warning(
+            "correlation.timeout",
+            timeout=_CORRELATION_TIMEOUT_SEC,
+            hint=(
+                "Correlation exceeded its budget on a very large event log — "
+                "falling back to the uncorrelated finding pool so the scan still "
+                "completes and exports a report."
+            ),
+        )
+        correlated = findings
     scoring_result = Scorer().score(correlated)
     event_count = await reader.count()
 

@@ -1236,6 +1236,33 @@ def get_scan(scan_id: str) -> dict[str, Any] | None:
     return _SCANS.get(scan_id)
 
 
+def list_scans() -> list[dict[str, Any]]:
+    """Serializable snapshot of every scan this API process is tracking.
+
+    The backend runs all scans as subprocesses of this single process, so
+    ``_SCANS`` already holds every in-flight scan regardless of which browser
+    session started it. Exposing this lets any session (re)discover scans
+    started elsewhere and re-attach to their SSE streams — the stream replays
+    its buffered log from the start, so a late joiner catches up. The live
+    ``process`` handle and the ``started_dirs`` set are dropped (not
+    JSON-serialisable / internal).
+    """
+    out: list[dict[str, Any]] = []
+    for sid, e in _SCANS.items():
+        out.append({
+            "scan_id": sid,
+            "status": e.get("status"),
+            "name": e.get("name"),
+            "command": e.get("command"),
+            "args": e.get("args"),
+            "session_id": e.get("session_id"),
+            "eta_sec": e.get("eta_sec"),
+            "is_static": e.get("is_static"),
+            "line_count": len(e.get("lines") or []),
+        })
+    return out
+
+
 async def stream_scan(scan_id: str):  # noqa: ANN201
     """Async generator that yields SSE-compatible dicts until the scan ends."""
     entry = _SCANS.get(scan_id)

@@ -64,6 +64,13 @@ export const fetchHealth = () =>
 export const fetchSessionDetail = (id) => get(`/sessions/${encodeURIComponent(id)}`).catch(() => null);
 
 /**
+ * List every scan the backend is tracking (running + finished this process),
+ * so a session can discover scans started in another session and show them as
+ * in-progress. Returns [] on failure.
+ */
+export const fetchScans = () => get("/scans").catch(() => []);
+
+/**
  * Start a real scan — POSTs to the backend, which spawns `minos` as a
  * subprocess. Returns { scan_id }. Use connectScanStream(scan_id, ...) to
  * receive live output.

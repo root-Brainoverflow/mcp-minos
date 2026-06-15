@@ -8,7 +8,7 @@ import { DashboardScreen } from "./screens/dashboard.jsx";
 import { DiscoverScreen, ConfigureScreen, ProgressScreen, ActiveScansList } from "./screens/scanflow.jsx";
 import { ResultsScreen, FindingsScreen } from "./screens/report.jsx";
 import { LoginScreen } from "./screens/login.jsx";
-import { fetchHealth, createScan, connectScanStream } from "./api.js";
+import { fetchHealth, createScan, connectScanStream, fetchScans } from "./api.js";
 import { t, getLang, setLang } from "./i18n.js";
 
 // ── Baked design defaults (were the "Tweaks" panel controls) ────────────────
@@ -68,6 +68,40 @@ export default function App() {
     let alive = true;
     fetchHealth().then((h) => { if (alive) setHealth(h); });
     return () => { alive = false; };
+  }, []);
+
+  // Discover scans started in OTHER sessions. The backend runs every scan as a
+  // subprocess of its single process, so GET /scans lists them all regardless
+  // of which browser started them. We poll and merge any running scan we don't
+  // already track (by scan id) into `scans`; the SSE effect below then attaches
+  // a stream (which replays the buffered log), so it shows up as in-progress
+  // and stays live here too. Finished scans are ignored — only running ones.
+  useEffect(() => {
+    let alive = true;
+    const sync = async () => {
+      const remote = await fetchScans();
+      if (!alive || !Array.isArray(remote)) return;
+      setScans((prev) => {
+        const known = new Set(prev.map((s) => s.id).filter(Boolean));
+        const additions = remote
+          .filter((r) => r.status === "running" && r.scan_id && !known.has(r.scan_id))
+          .map((r) => ({
+            key: `rs-${r.scan_id}`,
+            id: r.scan_id,
+            startedAt: Date.now(),
+            server: { name: r.name || r.command || "scan" },
+            etaSec: r.eta_sec || null,
+            error: null,
+            status: "running",
+            sessionId: r.session_id || null,
+            lines: [],
+          }));
+        return additions.length ? [...prev, ...additions] : prev;
+      });
+    };
+    sync();
+    const iv = setInterval(sync, 4000);
+    return () => { alive = false; clearInterval(iv); };
   }, []);
 
   // One SSE stream per running scan, owned by App so background scans keep
