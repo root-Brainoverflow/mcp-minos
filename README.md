@@ -81,6 +81,7 @@ silent sample fallback once the backend is reachable.
 | `GET  /api/sessions/{id}` | **live** per-session report from `results/` |
 | `GET  /api/findings` | fleet-wide findings |
 | `GET  /api/ruleset` | **live** Semgrep packs parsed from `static/patterns/*.yaml` |
+| `GET  /api/scans` | running/recent scans across **all** sessions (cross-session progress) |
 | `POST /api/scans` | start a real scan — spawns `minos`, returns `scan_id` + ETA |
 | `GET  /api/scans/{id}/stream` | **SSE** live stderr → structured progress steps |
 
