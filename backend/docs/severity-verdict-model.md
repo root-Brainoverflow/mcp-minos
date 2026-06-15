@@ -611,7 +611,7 @@ vulnerable 서버의 "민감 경로 파일 read" 1건을 단계별로:
 툴이 정상 노출됐고 시퀀스가 돌았으면 **PASS**(warnings: stability; SIGSEGV류면 §8.3 플래그). 서버를 못 띄우거나 툴 0개면 **ERROR(검사 불가)**.
 - **vulnerable 서버**: 민감경로 read(§10.0) 또는 path-traversal 성공(TAKEOVER/realized → CRITICAL) → **REJECT**. SQL 에러 누출은 MEDIUM warn.
 - **malicious 서버**: 툴 응답 인젝션(PARTIAL_CI/realized → HIGH) → **REJECT**; description 패턴은 단독 POTENTIAL이라 warn(같은 R3 그룹으로 표시).
-- **redis 서버** ([report.md](../results/ses-f175db4c-2dc3-4d1c-91da-fb60b318d22a/report.md)): 이 세션은 **툴 0개 + init_enumerate timeout
+- **redis 서버** (report.md 예시): 이 세션은 **툴 0개 + init_enumerate timeout
   - fuzz_input_validation 완료 전 크래시** — §8.4 트리거(노출 툴 0개 / 시퀀스 완료 전 크래시)에 해당 → **ERROR(검사 불가)**.
   (대조용: 만약 툴이 정상 노출되고 시퀀스가 끝난 뒤 단발성 처리 크래시만 났다면 PASS+warnings(stability)였겠지만, 이 세션은 그 경우가 아니다.)
 

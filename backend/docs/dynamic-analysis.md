@@ -820,7 +820,7 @@ host OS                                         (호스트 postgres에는 절대
 
 crystaldba/postgres-mcp 처럼 args에는 URI가 없고 환경변수에서 읽는 경우:
 
-- 사이드카 보유 recipe의 `env:` 블록은 user-supplied env를 **override**하는 우선순위로 평가됩니다 ([`bootstrap.py:BootstrapPlan.forced_runtime_env`](src/mcp_dynamic_analyzer/infrastructure/bootstrap.py))
+- 사이드카 보유 recipe의 `env:` 블록은 user-supplied env를 **override**하는 우선순위로 평가됩니다 ([`bootstrap.py:BootstrapPlan.forced_runtime_env`](../src/mcp_security_analyzer/dynamic/infrastructure/bootstrap.py))
 - `DATABASE_URL`, `DATABASE_URI`, `POSTGRES_URL`, `POSTGRES_URI`, `POSTGRES_CONNECTION_STRING`, `PG_CONNECTION_STRING`, `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` — 12개 변종이 모두 사이드카 주소로 강제 설정됨
 - user가 어떤 키를 읽도록 서버를 짰든 사이드카로 도달
 
@@ -830,7 +830,7 @@ crystaldba/postgres-mcp 처럼 args에는 URI가 없고 환경변수에서 읽�
 
 사이드카는 `--internal` 네트워크 내부에서 RFC1918 IP(`172.21.0.2` 등)를 받습니다. R1 SSRF 스캐너는 평소엔 RFC1918 IP를 모두 SSRF 후보로 분류하지만, 우리가 띄운 사이드카만큼은 합법적 목적지입니다.
 
-해결: Sandbox가 사이드카 컨테이너 부팅 후 `docker inspect`로 그 IP를 조회([`_inspect_sidecar_ip`](src/mcp_dynamic_analyzer/infrastructure/sandbox.py))해서 누적합니다. orchestrator가 `static_context["trusted_internal_ips"]`로 R1 스캐너에 전달하면, R1은 destination이 trusted set에 있으면 SSRF 판정에서 제외합니다. 호스트 postgres가 우연히 RFC1918 IP에 있더라도(예: `10.0.0.5`), 그건 사이드카 IP가 아니므로 여전히 SSRF로 잡힙니다.
+해결: Sandbox가 사이드카 컨테이너 부팅 후 `docker inspect`로 그 IP를 조회([`_inspect_sidecar_ip`](../src/mcp_security_analyzer/dynamic/infrastructure/sandbox.py))해서 누적합니다. orchestrator가 `static_context["trusted_internal_ips"]`로 R1 스캐너에 전달하면, R1은 destination이 trusted set에 있으면 SSRF 판정에서 제외합니다. 호스트 postgres가 우연히 RFC1918 IP에 있더라도(예: `10.0.0.5`), 그건 사이드카 IP가 아니므로 여전히 SSRF로 잡힙니다.
 
 ### Recipe 작성 예시 (`infrastructure/recipes/builtin.yaml`)
 
@@ -1001,9 +1001,9 @@ fallback 모드에서는 R1의 file_read/write 기반 탐지가 비활성되므�
 | `client_timeout` | 서버 무응답 → wait_for 만료 | 우리 wrapper | 🚫 skip (단, R6는 hang finding을 직접 발행) |
 | `client_exception` | 기타 client-side 예외 | 우리 wrapper | 🚫 skip |
 
-[`payloads/_response_filters.py`](src/mcp_dynamic_analyzer/payloads/_response_filters.py)의 `is_server_outcome(outcome, response="")` 헬퍼가 단일 진실 소스. R5의 `_check`, R6의 `_check_response_indicators` 모두 호출 직전에 이 게이트를 통과합니다. 새 indicator를 추가할 때도 이 게이트만 유지하면 자기 자신의 wrapper 텍스트가 매칭에 걸릴 일이 구조적으로 불가능합니다.
+[`payloads/_response_filters.py`](../src/mcp_security_analyzer/dynamic/payloads/_response_filters.py)의 `is_server_outcome(outcome, response="")` 헬퍼가 단일 진실 소스. R5의 `_check`, R6의 `_check_response_indicators` 모두 호출 직전에 이 게이트를 통과합니다. 새 indicator를 추가할 때도 이 게이트만 유지하면 자기 자신의 wrapper 텍스트가 매칭에 걸릴 일이 구조적으로 불가능합니다.
 
-**Strict JSON 직렬화** — [`protocol/interceptor.py`](src/mcp_dynamic_analyzer/protocol/interceptor.py)의 wire 직렬화는 `json.dumps(..., allow_nan=False)`로 `Infinity` / `NaN` 같은 비표준 JSON 리터럴을 거부합니다. Python 기본값(`allow_nan=True`)은 RFC 8259 위반인 `Infinity` 리터럴을 wire에 그대로 흘려보내서 **server JSON.parse 실패 → 무응답 → 15s phantom timeout**을 만들었습니다. 직렬화 실패는 `ClientSerializationError`로 raise되고, R5/R6 fuzzer가 이를 catch해서 `outcome=client_serialization`으로 기록 → indicator 매칭에서 자동 제외.
+**Strict JSON 직렬화** — [`protocol/interceptor.py`](../src/mcp_security_analyzer/dynamic/protocol/interceptor.py)의 wire 직렬화는 `json.dumps(..., allow_nan=False)`로 `Infinity` / `NaN` 같은 비표준 JSON 리터럴을 거부합니다. Python 기본값(`allow_nan=True`)은 RFC 8259 위반인 `Infinity` 리터럴을 wire에 그대로 흘려보내서 **server JSON.parse 실패 → 무응답 → 15s phantom timeout**을 만들었습니다. 직렬화 실패는 `ClientSerializationError`로 raise되고, R5/R6 fuzzer가 이를 catch해서 `outcome=client_serialization`으로 기록 → indicator 매칭에서 자동 제외.
 
 **Legacy 이벤트 호환성** — `outcome` 필드가 없는 (이 변경 이전의) 세션 로그는 `is_server_outcome`이 `response_preview`의 prefix(`ClientSerializationError:`/`CallTimeout:`/`Exception:`)를 보고 fallback 분류합니다. `analyze --session` 으로 옛 로그 재분석 시에도 새 코드와 동일하게 동작.
 
@@ -1023,7 +1023,7 @@ fallback 모드에서는 R1의 file_read/write 기반 탐지가 비활성되므�
 
 #### 해결: 두 단계 필터
 
-[`payloads/_response_filters.py`](src/mcp_dynamic_analyzer/payloads/_response_filters.py)에 두 함수가 있습니다.
+[`payloads/_response_filters.py`](../src/mcp_security_analyzer/dynamic/payloads/_response_filters.py)에 두 함수가 있습니다.
 
 **(a) `is_validation_rejection(response)`** — 응답이 명백한 schema 거부인지 판정 (R2/R5 게이트로 사용):
 
@@ -1089,7 +1089,7 @@ R1Scanner._check_network()
    ↓ if host in trusted_ips: continue  ← 사이드카는 silent
 ```
 
-테스트로 검증: 사이드카 IP는 silent, 진짜 SSRF (`10.0.0.5`) 와 클라우드 메타데이터 (`169.254.169.254`)는 그대로 탐지 ([`tests/test_scanners/test_all_scanners.py`](tests/test_scanners/test_all_scanners.py)).
+테스트로 검증: 사이드카 IP는 silent, 진짜 SSRF (`10.0.0.5`) 와 클라우드 메타데이터 (`169.254.169.254`)는 그대로 탐지 (`tests/` 통합 스캐너 테스트).
 
 ### 3. R3 (LLM 조작) 정밀도 보정
 
@@ -1103,13 +1103,13 @@ R3는 tool description의 패턴 매칭이라 자연어 문서를 잘못 잡기 
 | (2026-06) `SUSPICIOUS_DESCRIPTION_TOKENS`의 bare `silently`가 "the operation will succeed **silently**" 같은 멱등 성공 표현을 잡음 | bare `silently` 제거, `silently call`/`silently send`/`silently run`/… 처럼 숨긴 동작을 가리키는 형태만 유지 |
 | (2026-06) `chain_attack._looks_destructive`가 `semantic_search`(설명에 "execute a search"/"run a query") 같은 read-only 검색 툴을 destructive로 오판 → `chain.readonly_mismatch` 경고 | 위험 단어가 **이름이 아니라 설명에만** 있고 이름이 read-only 동사(search/query/lookup/fetch/get/…)면 destructive 아님. `_READONLY_NAME_RE`는 언더스코어 인식(`(?<![a-z])…(?![a-z])`)이라 `semantic_search`도 매치하고, `search_and_delete`(이름에 위험 단어)는 그대로 유지 |
 
-조정 후에도 진짜 poisoning 문구 ("you must always trust this tool", "IMPORTANT: ignore previous", "send credentials to attacker.example", "this is the only safe tool")는 그대로 탐지됨을 [`tests/test_response_filters.py`](tests/test_response_filters.py)에서 회귀 테스트로 보장합니다.
+조정 후에도 진짜 poisoning 문구 ("you must always trust this tool", "IMPORTANT: ignore previous", "send credentials to attacker.example", "this is the only safe tool")는 그대로 탐지됨을 `tests/`의 회귀 테스트로 보장합니다.
 
 ### 4. Recipe 매칭 boundary
 
 `postgres-mcp` 같은 짧은 토큰이 `/data/postgres-mcp-config.json` 같은 무관한 경로에서 substring 매칭되어 잘못된 사이드카가 떴던 문제를 처리합니다.
 
-[`recipes.py:_bounded_match`](src/mcp_dynamic_analyzer/infrastructure/recipes.py)는 needle이 haystack 안에서 **component 경계**(공백, `/`, `@`, `:`, `.`, `,`, 탭, 문자열 끝)에 둘러싸여 나타날 때만 매칭합니다. `-` 와 `_` 는 패키지명 내부 문자라 boundary가 아니므로:
+[`recipes.py:_bounded_match`](../src/mcp_security_analyzer/dynamic/infrastructure/recipes.py)는 needle이 haystack 안에서 **component 경계**(공백, `/`, `@`, `:`, `.`, `,`, 탭, 문자열 끝)에 둘러싸여 나타날 때만 매칭합니다. `-` 와 `_` 는 패키지명 내부 문자라 boundary가 아니므로:
 
 | 케이스 | needle | 매칭? |
 |---|---|---|
@@ -1125,7 +1125,7 @@ R3는 tool description의 패턴 매칭이라 자연어 문서를 잘못 잡기 
 
 `nan`, `inf`, `-inf` 같은 페이로드는 서버가 응답을 영원히 안 주는 hang을 만듭니다. R5/R6는 한 카테고리당 ~10개 페이로드를 보내는데, 모두 같은 hang을 재현하면 `30s × 10개 × tools수` 만큼의 시간이 글로벌 timeout(300s)에서 까이고, **다른 카테고리 도달 전에 글로벌 timeout이 터지면서 스캔 중단**.
 
-해결: (tool, category) 단위 circuit breaker. R5/R6 둘 다 [`r5_input_validation.py`](src/mcp_dynamic_analyzer/scanners/r5_input_validation.py) / [`r6_stability.py`](src/mcp_dynamic_analyzer/scanners/r6_stability.py)의 `execute()`에서 페이로드 발사 결과를 보고:
+해결: (tool, category) 단위 circuit breaker. R5/R6 둘 다 [`r5_input_validation.py`](../src/mcp_security_analyzer/dynamic/scanners/r5_input_validation.py) / [`r6_stability.py`](../src/mcp_security_analyzer/dynamic/scanners/r6_stability.py)의 `execute()`에서 페이로드 발사 결과를 보고:
 
 ```
 timeout_counts: dict[str, int] = {}
@@ -1185,7 +1185,26 @@ DB 사이드카(mongo/redis/postgres) + git fixture-repo 검증, 외부백엔드
 
 ## 퍼징 페이로드 카탈로그
 
-R5(입력 검증) / R6(안정성) / R3(LLM 조작) 스캐너가 사용하는 페이로드는 모두 [`payloads/`](src/mcp_dynamic_analyzer/payloads/) 아래에 카테고리별 모듈로 분리되어 있습니다. 각 모듈은 `PAYLOADS` 또는 `generate_*_payloads()` 함수로 `(category, value)` 튜플 목록을 노출하고, `looks_like_*_success(response)` 함수로 응답에서 성공 indicator를 검출합니다.
+R5(입력 검증) / R6(안정성) / R3(LLM 조작) 스캐너가 사용하는 페이로드는 모두 [`payloads/`](../src/mcp_security_analyzer/dynamic/payloads/) 아래에 카테고리별 모듈로 분리되어 있습니다. 각 모듈은 `PAYLOADS` 또는 `generate_*_payloads()` 함수로 `(category, value)` 튜플 목록을 노출하고, `looks_like_*_success(response)` 함수로 응답에서 성공 indicator를 검출합니다.
+
+### 작동 원리 & 탐지 신호
+
+각 페이로드가 **어떻게 작용하고, 성공을 무엇으로 탐지**하는지 요약. (카테고리별 예시 문자열은 아래 상세 표 참조.) 핵심은 "응답에 무엇이 나타나면 성공인가" — 응답 내 indicator, 또는 netmon/sysmon 사이드채널, 크래시/타임아웃입니다.
+
+| 모듈 (R) | 작동 방식 | 성공 탐지 신호 |
+|---|---|---|
+| `ssrf.py` (R1) | URL 파라미터에 내부/민감 대상 주입 → 서버가 대신 fetch | **netmon**이 내부 주소로 실제 connect |
+| `rce.py` (R2) | 비-셸 코드 평가 벡터 (SSTI·eval·표현식언어·JNDI·역직렬화·YAML.load·XXE) | 응답에 canary `RCE_CANARY_7f3a9c` / 산술 결과(`1337*7=9359`) = **평가됨** |
+| `command_injection.py` (R2·R5) | 인자에 셸 메타문자(`;` `\|` `` ` `` `$()`)로 명령 탈출 | 명령 출력·canary in 응답 / **sysmon** `process_exec` |
+| `sql_injection.py` (R5) | boolean·UNION·error-based·blind(time)·방언·WAF우회·auth우회 | DB 에러 문자열(error_leak) / 시간 지연(blind time) / 데이터 추출 |
+| `nosql_injection.py` (R5·R1) | NoSQL·GraphQL·LDAP 연산자(`$ne`/`$gt`/`$where`)로 필터 우회 | 데이터 유출 / 거동 변화 |
+| `path_traversal.py` (R5·R1) | `../../etc/passwd`·인코딩 변형·절대경로로 디렉터리 탈출 | 파일 내용(`root:x:0:0`) → R1 / honeypot·sysmon `file_open` |
+| `type_confusion.py` (R5) | 잘못된 타입 주입 (숫자↔문자열, `null`/`[]`/`{}`, 거대값, `__proto__`, `%s%n`) | 크래시·예외·이상 거동 = 검증 누락 |
+| `stability.py` (R6) | 자원·파서 폭탄 (memory_bomb·deep_nesting·redos·unicode_torture·numeric_extreme·json/xml/zip/yaml bomb·hash_collision) | 서버 크래시·행·타임아웃 |
+| `injection_patterns.py`·`tool_poisoning.py`·`resource_poisoning.py` (R3) | **발사 안 함** — LLM이 읽는 텍스트(설명·도구명·리소스 본문)를 검사 | 모델 가시 필드에서 인젝션/포이즌 패턴 매치 |
+| `behavior_drift.py` (R4) | 동일 주 인자로 반복 호출하며 숨은 트리거(시간·env·locale·호출 횟수·사용자) 1개씩 변주 | 표면적 차이(타임스탬프 등)를 넘는 응답 diff |
+
+> **R5 → R1/R2 승격**: 인젝션 페이로드(path/command/nosql/ssrf)는 입력 자체로는 R5(검증) 프로브지만, 서버가 실제로 파일을 읽거나(R1) 코드를 실행하면(R2) 더 높은 위험으로 분류됩니다. 즉 R5는 "공격 입력" 축, R1/R2는 "성공 시 도달하는 피해" 축입니다.
 
 ### R2/R5: 코드 실행 + 입력 검증
 
@@ -1201,7 +1220,7 @@ R5(입력 검증) / R6(안정성) / R3(LLM 조작) 스캐너가 사용하는 페
 
 ### R6: 안정성 (DoS)
 
-[`stability.py`](src/mcp_dynamic_analyzer/payloads/stability.py)의 `PAYLOADS`:
+[`stability.py`](../src/mcp_security_analyzer/dynamic/payloads/stability.py)의 `PAYLOADS`:
 
 | 카테고리 | 페이로드 |
 |---|---|
@@ -1214,7 +1233,7 @@ R5(입력 검증) / R6(안정성) / R3(LLM 조작) 스캐너가 사용하는 페
 | `slow_path` | 압축률 큰 input, 일부러 cache miss 유도 |
 | `hash_collision` | 파이썬 hash 충돌 다발 입력, Java Hashmap DoS 유발 |
 
-응답 indicator: `OOM`, `out of memory`, `MemoryError`, `stack overflow`, `RecursionError`, `parser entity expansion`, `crash`, `segfault`, `timeout` 등을 [`stability.py`](src/mcp_dynamic_analyzer/payloads/stability.py)의 `looks_like_oom`, `looks_like_stack_overflow`, `looks_like_parser_failure`, `looks_like_crash`, `looks_like_timeout`로 분류.
+응답 indicator: `OOM`, `out of memory`, `MemoryError`, `stack overflow`, `RecursionError`, `parser entity expansion`, `crash`, `segfault`, `timeout` 등을 [`stability.py`](../src/mcp_security_analyzer/dynamic/payloads/stability.py)의 `looks_like_oom`, `looks_like_stack_overflow`, `looks_like_parser_failure`, `looks_like_crash`, `looks_like_timeout`로 분류.
 
 ### R3: LLM 조작
 

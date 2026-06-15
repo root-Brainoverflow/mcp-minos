@@ -1,5 +1,21 @@
 # 샌드박스 환경 정합 (Sandbox Environment Matching)
 
+## TL;DR — 전체 흐름 한 줄 요약
+
+```
+명령/매니페스트 → 이미지 선택(resolve)
+              → 의존성·소스시그널 수집(preflight)
+              → recipe 매칭(plan): 이미지 베이크(A) + 사이드카·redirect(B)
+              → Dockerfile 빌드 + 사이드카 기동
+              → 기동 실패? stderr-retry로 패치·재빌드 (1회)
+              → 응답 degraded? prereq-retry로 재빌드·전체 재수집 (1회)
+              → 그래도 미충족이면 caveat 달고 진행
+```
+
+> 선언적 recipe로 **아는 서버는 미리 맞추고(plan)**, 모르는 결손은 **stderr/응답을 보고 런타임에 고침(2단계 retry)**.
+
+---
+
 이 문서는 `src/mcp_security_analyzer/dynamic/infrastructure/` 하위 네 모듈의
 동작과 책임 분담을 정리한다.
 
